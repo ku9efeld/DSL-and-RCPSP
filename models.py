@@ -38,6 +38,7 @@ class DeepSeekSession:
         self.max_tokens = max_tokens
         self.max_history = max_history
         self.generate_prompt = generate_prompt
+        self.request_counter = 0
         
         # История сообщений для данной сессии
         self._history: List[Dict[str, str]] = []
@@ -110,7 +111,7 @@ class DeepSeekSession:
         
         # Отправляем запрос модели
         response = self.chat_model.invoke(messages)
-        
+     
         # Добавляем ответ ассистента в историю
         self._add_to_history("assistant", response.content)
         
@@ -126,4 +127,5 @@ class DeepSeekSession:
         TA2, RA2, _ = y
         response = self.chat_model.invoke(self.generate_prompt.format(TA1, RA1, TA2, RA2)).content
         self._add_to_history("llm", response)
+        self.request_counter += 1
         return response
