@@ -16,17 +16,26 @@
 [Статья](https://arxiv.org/pdf/2309.03409), [Git](https://github.com/google-deepmind/opro)  
 
     - SGE (Self-Guiding Exploration)
-        Фреймворк решения задач в несколько стадий 
+        Фреймворк решения задач в несколько стадий (от декомпозиции до решения задачи).
 [Статья](https://arxiv.org/pdf/2405.17950), [Git](https://github.com/Zangir/LLM-for-CP)  
 
-    - PHP
-[Статья]()
+    - PHP (Progressive-hint prompting)
+        Схож с OPRO, иттерационно рядом с заданием на генерацию указывает все предыдущие ответы.
+[Статья](https://arxiv.org/pdf/2304.09797)
 
 ### 2. Нейросетовой подход (Reinforcement, NN)
-    - PointerNet + JSP 
-    - 
+1) PointerNet + JSP - [Статья](https://arxiv.org/pdf/2401.11849)
+2) LoRa для QWEN модели под CO проблему - [Статья](https://arxiv.org/pdf/2509.16865)
 ## Эксперимент 
-Тут должно быть описание работы
+### 0. Генерация датасета
+В качестве датасета были взяты маленькие синтетические графы работ, сгенированные с помощью SAMPO. После для датасета были использованы
+ LFT, HEFT, GA(p_cross=0.15, p_mutate=0.1, generations = 10), по итогам получены oracle solution. 
+### 1. Проверка гипотез о промптах
+
+Формула расчета GAP между методами: $GAP = \frac{m_{llm}}{m_{opt_*}} - 1$.
+
+Тут должно быть описание работы. Результат работы `script.py`
+
 | PROBLEM   | HEFT | LFT | GA | B-makespan | llm_B_makespan | feasibility | gap  |
 |-----------|------|-----|----|------------|----------------|-------------|------|
 | wg_5.json | 76   | 84  | 52 | 52         | 28              | 81%         | 0%   |
