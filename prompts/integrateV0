@@ -1,0 +1,102 @@
+Implement in Python the following steps describe only the priority ordering logic for the {method} heuristic.
+For all scheduling mechanics (contractor assignment, time advancement,
+feasibility checks) — follow Algorithm Notes strictly.
+{steps}.
+The code should define a function `rcpsp_solver(jobs, resources_borders, communication_coefficient=None)`.
+Input:
+`jobs` is a list of dictionaries, where each job contains exactly these fields:
+- `id`: str, unique job identifier
+- `demand_min` / `demand_max`: dict[str, number], lower and upper resource estimates by resource type
+- `work_volume`: dict[str, number], total work volume by resource type
+- `predecessors`: list[str] or str. Normalize to list at parse time: treat "" as [], treat a non-empty string as a single-element list, contains the ids of all jobs that must finish before this job can start.
+- `priority`: number, heuristic priority value
+In `demand_min`, `demand_max`, and `work_volume`, each key denotes a resource type.
+`resources_borders` is a list of contractor resource-availability profiles, where `workers`
+contains the static maximum capacity for each resource type, and `id` is the contractor id.
+`communication_coefficient` is an optional callable `(n: int, m: int) -> float`, where
+`n` is the allocated worker count and `m` is `demand_max[r]` for resource `r`.
+If provided, use it to compute effective productivity per resource.
+Output:
+Return a tuple `(schedule, execution_order, resource_usage, makespan)`, where:
+- `schedule`: a dictionary mapping each `job_id` (str) to a tuple `(contractor_id, start_time, end_time)`.
+- `execution_order`: a list of `job_id`s in the order contractors were assigned (appended at scheduling time, not at job completion).
+- `resource_usage`: the internal resource usage tracking structure populated during scheduling, mapping contractor_id -> time_slot -> resource_type -> allocated worker count.
+- `makespan`: a number representing the total project duration.
+Algorithm notes:
+0. All time values (start_time, end_time, makespan) must be integers; use math.ceil() for duration division.
+1. Avoid naming conflicts with the 'time' module; use start_time, end_time, duration for schedule variables.
+2. Each job specifies a worker range [demand_min[r], demand_max[r]] per
+   resource type r. Allocate as many workers as available up to demand_max[r]:
+     allocated[r] = min(demand_max[r], min over t in [start_time, end_time) of
+       (workers[r] - resource_usage[contractor_id][t][r]))
+
+    If for any t in [start_time, end_time) it holds that
+     workers[r] - resource_usage[contractor_id][t][r] < demand_min[r],
+   then this contractor is infeasible for this job at this time and you must not allocate this resource r for this job.
+   
+   - Use defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: 0))) for resource_usage.
+   - Feasibility check at slot t: workers[r] - resource_usage[contractor_id][t][r] >= demand_min[r].
+   - Allocate by incrementing resource_usage[contractor_id][t][r] += allocated[r] for each t in [start_time, end_time).
+3. Job duration = max over all r in work_volume of ceil(work_volume[r] / productivity[r]), where:
+   - If communication_coefficient is provided: productivity[r] = allocated[r] * communication_coefficient(allocated[r], demand_max[r]).
+   - Otherwise: productivity[r] = allocated[r].
+   Skip contractor if for any r in work_volume:
+   r not in workers, or workers[r] < demand_min[r].
+   Ignore resource types where work_volume[r] == 0 or demand_min[r] == demand_max[r] == 0.
+4. Always compute duration via compute_duration at scheduling time.
+   Precomputed durations (e.g. for priority ranking) must not be used
+   as the actual scheduled duration.
+5. At each current_time, the main loop executes exactly these steps in order:
+   1. COMPLETE: for each job in schedule where end_time <= current_time
+      and not yet marked complete, mark it complete and decrement
+      pending_predecessors for each of its successors exactly once.
+   2. ELIGIBLE: collect all unscheduled jobs where pending_predecessors == 0.
+   3. SCHEDULE: for each eligible job attempt assignment per EC4;
+      on success update resource_usage for [start_time, end_time),
+      append to execution_order, remove from unscheduled.
+      Remove each job from eligible immediately after it is scheduled.
+   4. ADVANCE: if no job was scheduled in step 3 and unscheduled jobs remain,
+      advance current_time = min(end_time for all jobs in active_jobs).
+      If active_jobs is empty and unscheduled jobs remain, raise ValueError.
+   resource_usage is never freed or reset.
+6. Use separate predecessor counters for topological analysis and for scheduling.
+7. A job becomes eligible only after all its predecessors have completed execution;
+   update predecessor counters only on completion events, never on job start or scheduling.
+8. For each eligible job, collect all feasible contractors at current_time, then choose.
+9. Before the main loop, verify that for every job at least one contractor
+   exists where workers[r] >= demand_min[r] for all r where work_volume[r] > 0
+   and not (demand_min[r] == demand_max[r] == 0).
+   Raise ValueError if any job has no feasible contractor.
+FORBID:
+- Never use range() to iterate over all time slots of the planning horizon
+  or over all jobs by index. range() is only permitted within
+  check_resources and allocate_resources for iterating over [start_time, end_time).
+- Never call sort() or sorted() inside the main scheduling loop.
+  Priority keys must be precomputed before the loop.
+- Never scan all jobs or all contractors linearly to look up by id;
+  use dictionaries for O(1) access.
+- Never advance current_time by incrementing it (current_time += 1).
+  Time advances only to min(end_time for all jobs in active_jobs).
+- Never use break, return, or early exit inside the eligible job
+  scheduling loop. All eligible jobs must be attempted before advancing time.
+EDGE CASES:
+EC0. Validate that every job contains all required fields and that all job ids are unique; otherwise raise ValueError.
+EC1. If a predecessor id is missing from jobs, raise ValueError.
+EC2. If the precedence graph contains a cycle, raise ValueError.
+EC3. If resources_borders is empty while jobs is non-empty, raise ValueError.
+EC4. For each eligible job, select contractor per notes 3 and 8:
+   collect all feasible contractors where workers[r] >= demand_min[r]
+   for all r in work_volume (compute_duration non-None) AND
+   check_resources passes for [current_time, current_time + duration),
+   then pick contractor with smallest sum(contractor['workers'].values()),
+   ties broken by lexicographically smallest contractor id. Skip job if none feasible.
+EC5. If active_jobs is empty and unscheduled jobs remain after ADVANCE step,
+     raise ValueError("Deadlock detected").
+
+Pre-loop validation order: EC0 → EC1 → EC2 → EC3 → Note9.
+
+rcpsp_solver() must enforce a strict wall-clock time limit of 10 seconds for its computational execution.
+Provide only the code inside a Python code block like this:
+```python
+# Your code here
+```

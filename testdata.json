@@ -1,0 +1,44 @@
+{
+    "test0": {
+        "jobs": [
+            {
+                "id": "1",
+                "demand_min": {"l": 1, "r": 0},
+                "demand_max": {"l": 1, "r": 0},
+                "work_volume": {"l": 2, "r": 0},
+                "predecessors": [],
+                "priority": 1
+            },
+            {
+                "id": "2",
+                "demand_min": {"l": 0, "r": 1},
+                "demand_max": {"l": 0, "r": 1},
+                "work_volume": {"l": 0, "r": 3},
+                "predecessors": ["1"],
+                "priority": 1
+            },
+            {
+                "id": "3",
+                "demand_min": {"l": 1, "r": 0},
+                "demand_max": {"l": 1, "r": 0},
+                "work_volume": {"l": 4, "r": 0},
+                "predecessors": ["1"],
+                "priority": 1
+            },
+            {
+                "id": "4",
+                "demand_min": {"l": 1, "r": 1},
+                "demand_max": {"l": 1, "r": 1},
+                "work_volume": {"l": 2, "r": 2},
+                "predecessors": ["2", "3"],
+                "priority": 1
+            }
+        ],
+        "resources_detailed": [
+            {
+                "id": "0",
+                "workers": {"l": 2, "r": 2}
+            }
+        ]
+    }
+}

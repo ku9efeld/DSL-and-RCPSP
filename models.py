@@ -7,6 +7,9 @@ import logging
 # Отключаем логирование httpx и httpcore
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+
+
+
 class DeepSeekSession:
     def __init__(
         self,
@@ -15,9 +18,9 @@ class DeepSeekSession:
         system_prompt: str,
         base_url: str = "https://api.deepseek.com",
         model_name: str = "deepseek-chat",
-        temperature: float = 0.33,
-        max_tokens: int = 4000,
-        max_history: int = 20
+        temperature: float = 0.1,
+        max_tokens: int = 1000,
+        max_history: int = 1000
     ):
         """
         Инициализация новой сессии с сохранением контекста.
@@ -48,6 +51,8 @@ class DeepSeekSession:
         
         # Инициализируем модель
         self._init_model()
+
+  
     
     def _init_model(self):
         """Инициализация модели LangChain"""
@@ -57,6 +62,8 @@ class DeepSeekSession:
             openai_api_base=self.base_url,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            request_timeout = 90.0,
+            max_retries = 10
         )
     
     def _add_to_history(self, role: str, content: str):
@@ -122,10 +129,12 @@ class DeepSeekSession:
         return self._history.copy()
     
 
-    def generate(self, x, y):
-        TA1, RA1, _ = x
-        TA2, RA2, _ = y
-        response = self.chat_model.invoke(self.generate_prompt.format(TA1, RA1, TA2, RA2)).content
-        self._add_to_history("llm", response)
-        self.request_counter += 1
-        return response
+
+
+    # def generate(self, x, y):
+    #     TA1, RA1, _ = x
+    #     TA2, RA2, _ = y
+    #     response = self.chat_model.invoke(self.generate_prompt.format(TA1, RA1, TA2, RA2)).content
+    #     self._add_to_history("llm", response)
+    #     self.request_counter += 1
+    #     return response

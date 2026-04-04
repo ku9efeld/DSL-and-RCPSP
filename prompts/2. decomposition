@@ -1,0 +1,3 @@
+Provide detailed steps to implement the {method} method for solving {problem}. 
+List all the steps in a JSON array of strings. Ensure the response is valid JSON, and nothing else. 
+For example: ["Step1", "Step2", "Step3"]
