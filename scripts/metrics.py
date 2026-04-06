@@ -15,12 +15,12 @@ def distance_matrices(solutions):
       D_resource:   np.ndarray [N, N] – доля различий по ресурс-профилю
       D_order:      np.ndarray [N, N] – доля различий по относительному порядку работ
     """
-    solvers = [s[0] for s in solutions]
+    solvers = [s[0][1] for s in solutions]
     N = len(solvers)
 
     # Удобные словари по имени солвера
-    schedules = {name: sched for name, _, sched in  solutions}
-    res_profiles = {name: rprof for name, rprof, _ in solutions}
+    schedules = {name[1] : sched for name, _, sched in  solutions}
+    res_profiles = {name[1] : rprof for name, rprof, _ in solutions}
 
     D_contractor = np.zeros((N, N), dtype=float)
     D_interval   = np.zeros((N, N), dtype=float)

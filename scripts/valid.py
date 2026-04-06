@@ -2,6 +2,9 @@ import tempfile
 import os
 from collections import defaultdict
 
+from sampo.utilities.validation import validate_schedule
+from sampo.schemas.schedule_spec import ScheduleSpec
+
 
 
 def interpter_solver(method, code, data):
@@ -24,8 +27,6 @@ def interpter_solver(method, code, data):
                     print(f"rcpsp_solver did not return a valid solution for method {method}")
             else:
                 print(f"No rcpsp_solver function found in the code for method {method}")
-
-            print('Solution:', makespan)
 
             return schedule, order, resource_usage, job_usage, makespan
 
@@ -189,6 +190,16 @@ def check_feasibility(schedule, job_usage, resource_usage, data):
     return check_predecessors(schedule, data['jobs']) \
           and check_resource_feasibility(resource_usage, data['resources_detailed']) \
           and check_capacity(data['jobs'], data['resources_detailed'], schedule, job_usage)
+
+
+
+def validate_schedule_bool(schedule_obj, work_graph, contractors, spec = ScheduleSpec()):
+    try:
+        validate_schedule(schedule_obj, work_graph,  contractors, ScheduleSpec())
+        return True
+    except AssertionError:
+        return False
+
 
 
 def resource_profiles(schedule, resource_usage):
