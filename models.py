@@ -7,6 +7,36 @@ import logging
 # Отключаем логирование httpx и httpcore
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+from openai import OpenAI
+import os
+
+class LLMModel(OpenAI):
+    def __init__(self, model, temperature = 0.1, max_tokens=15_000):
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.system_prompt_expert = 'You are an expert in resource constrained project scheduling problem algorithms. ' \
+                               'Write and run code to answer questions if needed.'
+        self.system_prompt_coder = 'You are an expert in resource constrained project scheduling problem algorithms.' \
+                                'Write clean, executable, production-ready Python code.'
+        super().__init__(
+            api_key=os.environ["LITE_LLM_IAI"],
+            base_url="https://api.duckduck.cloud/v1",
+            max_retries=3
+        )
+    def send_message(self, prompt, mode = 'expert'):
+        system_prompt = self.system_prompt_expert if mode == 'expert' else self.system_prompt_coder
+        response = self.chat.completions.create(
+                model = self.model,
+                messages=[
+                    {"role" : "system", "content": system_prompt},
+                    {"role" : "user", "content": prompt}
+                ],
+                temperature = self.temperature,
+                max_tokens=self.max_tokens
+            )
+        return response.choices[0].message.content
+    
 
 
 
@@ -55,7 +85,6 @@ class DeepSeekSession:
   
     
     def _init_model(self):
-        """Инициализация модели LangChain"""
         self.chat_model = ChatOpenAI(
             model=self.model_name,
             openai_api_key=self.api_key,
@@ -93,17 +122,7 @@ class DeepSeekSession:
         message: str,
         use_history: bool = True
     ) -> str:
-        """
-        Отправляет сообщение модели и возвращает ответ.
-        
-        Args:
-            message: текст сообщения пользователя
-            use_history: использовать ли историю предыдущих сообщений
-        
-        Returns:
-            ответ модели
-        """
-        # Добавляем сообщение пользователя в историю
+
         self._add_to_history("user", message)
         
         # Формируем сообщения для отправки
@@ -128,13 +147,3 @@ class DeepSeekSession:
         """Возвращает полную историю текущей сессии"""
         return self._history.copy()
     
-
-
-
-    # def generate(self, x, y):
-    #     TA1, RA1, _ = x
-    #     TA2, RA2, _ = y
-    #     response = self.chat_model.invoke(self.generate_prompt.format(TA1, RA1, TA2, RA2)).content
-    #     self._add_to_history("llm", response)
-    #     self.request_counter += 1
-    #     return response
