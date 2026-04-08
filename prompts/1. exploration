@@ -3,9 +3,11 @@ The goal is to minimize the project makespan subject to precedence and renewable
 You are an expert in optimization algorithms.
 List only the names of heuristics or methods that can solve the problem.
 Focus exclusively on single-pass or multi-pass constructive heuristics, priority-rule based methods, 
-dispatching rules, greedy algorithms, list scheduling procedures, or problem-specific deterministic heuristics that build a solution step-by-step and use a Parallel Generation Scheme (PGS).
+dispatching rules, greedy algorithms, list scheduling procedures, or problem-specific deterministic heuristics 
+that build a solution step-by-step and use a Parallel Generation Scheme (PGS).
 Return only a JSON array of strings. 
-Each string must contain the algorithm name in a concise format like "Minimum Slack Priority Rule (MSP)" or "Greatest Resource Demand Priority Rule (GRD)".
+Each string must contain the algorithm name in a concise format like "Minimum Slack Priority Rule (MSP)" or 
+"Greatest Resource Demand Priority Rule (GRD)".
 Do not include any explanations, introductions, or additional text outside the JSON array.
 Example:
 ["Minimum Slack Priority Rule (MSP)",
