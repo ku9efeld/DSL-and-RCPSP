@@ -2,6 +2,8 @@
 import os
 from scripts.wg_converter import WorkGraphConverter, ProjectConverter
 import json
+import math
+import random as rand
 from scripts.valid import validate_schedule_bool, interpter_solver
 # SAMPO
 from sampo.scheduler.genetic import GeneticScheduler
@@ -20,15 +22,24 @@ class LLMHeuristicScheduler(GeneticScheduler):
                  mutate_order = None,
                  mutate_zones = None,
                  mutate_resources = None,
-                 size_of_population = None
+                 size_of_population = None,
+                 type_init_pop_structure = None,
+                 max_plateau = 100,
+                 imprortance = 10
                  ):
+    
         self.solvers_by_path = os.path.join('Heuristics', solvers_by)
         self.llm_heuristics = self.get_llm_heuristics()
+        self.imprt = imprortance
         super().__init__(number_of_generation=number_of_generation, 
                         mutate_order=mutate_order, 
                         mutate_resources=mutate_resources, 
                         mutate_zones=mutate_zones,
-                        size_of_population=size_of_population)
+                        size_of_population=size_of_population,
+                        )
+        self.type_init_pop_structure = type_init_pop_structure
+        self._max_plateau_steps  = max_plateau
+        self.imprt = imprortance
 
     def get_filter(self):
         with open(os.path.join(self.solvers_by_path, 'original_heuristics.json'), "r", encoding="utf-8") as f:
@@ -50,7 +61,8 @@ class LLMHeuristicScheduler(GeneticScheduler):
     def to_input_solver(self, work_graph, contractors):
         return WorkGraphConverter().convert(work_graph, contractors)['rcpsp_data']
     
-    def generate_llm_population(self, work_graph, contractors, spec = ScheduleSpec()):
+    
+    def generate_llm_init_population(self, work_graph, contractors, spec = ScheduleSpec()):
         data = self.to_input_solver(work_graph, contractors)
         project_converter = ProjectConverter(work_graph, contractors)
         population = {}
@@ -59,8 +71,39 @@ class LLMHeuristicScheduler(GeneticScheduler):
             schedule_obj = project_converter.to_schedule(schedule, order, job_usage, makespan)
             graph_nodes = project_converter.get_list_graph_nodes(schedule_obj)
             if validate_schedule_bool(schedule_obj, work_graph, contractors, spec):
-                population[method] = (schedule_obj, graph_nodes, spec, 1)  # Schedule, list(GraphNode), Spec, weight
+                population[method] = (schedule_obj, graph_nodes, spec, self.imprt)  # Schedule, list(GraphNode), Spec, weight
         return population
+    
+
+
+    
+    def generate_population(self, n, work_graph, contractors):
+        type_init_pop_structure = self.type_init_pop_structure
+        match type_init_pop_structure:
+            case "onlyGeneratedHeurisitcs":
+                init_schedules = self.generate_llm_init_population(work_graph, contractors)
+                count_for_specified_types = math.ceil( n / len(init_schedules) )
+                count_for_specified_types = count_for_specified_types if count_for_specified_types > 0 else 1
+                counts = [count_for_specified_types] * len(init_schedules)
+                print(len(init_schedules), n, counts)
+                chromosome_types = rand.sample(list(init_schedules.keys()), k=n, counts=counts)
+                
+                #
+                project_converter = ProjectConverter(work_graph, contractors)
+                chromosomes = []
+                for generated_type in chromosome_types:
+                        chrm = project_converter.to_chromosome(init_schedules[generated_type][0])
+                        chromosomes.append(chrm)
+                return chromosomes[:n]
+
+            case "test1":
+                pass
+            case "test2":
+                pass
+  
+        return None
+        
+    
     
     def schedule_with_cache(self, work_graph, 
                             contractors, spec = ScheduleSpec(), validate = False, 
@@ -74,10 +117,20 @@ class LLMHeuristicScheduler(GeneticScheduler):
                                                                  self._deadline, self._weights)
         
         
-        init_schedules = basic_init_schedules | self.generate_llm_population(work_graph, contractors)
+        init_schedules = basic_init_schedules | self.generate_llm_init_population(work_graph, contractors)
+        # basic_init_schedules | 
+        #print(len(init_schedules))
+
         mutate_order, mutate_resources, mutate_zones, size_of_population = self.get_params(work_graph.vertex_count)
         deadline = None if self._optimize_resources else self._deadline
+        
 
+
+        # None -> pop = list[ChoromosomeType], n=len(pop), assert n = population_size
+        pop = None
+        if self.type_init_pop_structure:
+             pop = self.generate_population(size_of_population, work_graph, contractors)
+        
         schedules = build_schedules(work_graph,
                                     contractors,
                                     size_of_population,
@@ -89,7 +142,7 @@ class LLMHeuristicScheduler(GeneticScheduler):
                                     self.rand,
                                     spec,
                                     self._weights,
-                                    None,
+                                    pop,
                                     landscape,
                                     self.fitness_constructor,
                                     self.fitness_weights,

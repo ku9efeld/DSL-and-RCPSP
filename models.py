@@ -7,11 +7,11 @@ import logging
 # Отключаем логирование httpx и httpcore
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError, APIConnectionError
 import os
 
 class LLMModel(OpenAI):
-    def __init__(self, model, temperature = 0.1, max_tokens=15_000):
+    def __init__(self, model, temperature = 0.1, max_tokens=12_000):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -26,16 +26,26 @@ class LLMModel(OpenAI):
         )
     def send_message(self, prompt, mode = 'expert'):
         system_prompt = self.system_prompt_expert if mode == 'expert' else self.system_prompt_coder
-        response = self.chat.completions.create(
-                model = self.model,
-                messages=[
-                    {"role" : "system", "content": system_prompt},
-                    {"role" : "user", "content": prompt}
-                ],
-                temperature = self.temperature,
-                max_tokens=self.max_tokens
-            )
-        return response.choices[0].message.content
+        timeout = 30.0 if mode == 'expert' else 600.0
+        try:
+            response = self.chat.completions.create(
+                    model = self.model,
+                    messages=[
+                        {"role" : "system", "content": system_prompt},
+                        {"role" : "user", "content": prompt}
+                    ],
+                    temperature = self.temperature,
+                    max_tokens=self.max_tokens,
+                    timeout=timeout
+                )
+            return response.choices[0].message.content
+        except APITimeoutError as e:
+            raise TimeoutError(f"Timeout after 500s for model {self.model}") from e
+        except APIConnectionError as e:
+            raise RuntimeError(f"Connection error for model {self.model}") from e
+        
+
+        
     
 
 

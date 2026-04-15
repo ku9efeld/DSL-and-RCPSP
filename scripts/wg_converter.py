@@ -132,14 +132,23 @@ class ProjectConverter:
                                                self.spec, self.landscape, 
                                                self.get_graph(order_sampo)
                                                )
+    def to_chromosome(self, schedule_object):
+        schedule_works = iter(schedule_object.to_schedule_work_dict.values())
+        order_sampo = order_nodes_by_start_time(schedule_works, self.work_graph)
+        return convert_schedule_to_chromosome(self.work_id2index, self.worker_name2index,
+                                               self.contractor2index, self.contractor_borders, 
+                                               schedule_object, 
+                                               self.spec, self.landscape, 
+                                               self.get_graph(order_sampo)
+                                               )
 
         
     def to_schedule(self, schedule, order, job_usage, makespan):
         scheduled_works = []
         start, end = self.work_graph.start.id, self.work_graph.finish.id
-        contractors = iter(self.contractors.values())
+        iter_contractors = iter(self.contractors.values())
         start_project = ScheduledWork(self.work_units[start],  start_end_time=(Time(0), Time(0)), 
-                                    workers=[], contractor=next(contractors))
+                                    workers=[], contractor=next(iter_contractors))
         scheduled_works.append(start_project)
         for job_id in order:
             contractor_id, start_time, end_time  = schedule[job_id]
@@ -150,7 +159,7 @@ class ProjectConverter:
                                            contractor = self.contractors[contractor_id])
             scheduled_works.append(scheduled_work)
         end_project = ScheduledWork(self.work_units[end],  start_end_time=(Time(makespan), Time(makespan)), 
-                                    workers=[], contractor=next(contractors))
+                                    workers=[], contractor=next(iter_contractors))
         scheduled_works.append(end_project)
         return Schedule.from_scheduled_works(scheduled_works, self.work_graph)
     
