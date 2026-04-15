@@ -3,7 +3,7 @@ import sys
 import re
 #
 from sampo_api import *
-from prompts import * 
+from Drafts.scripts.prompts import * 
 from models import *
 #
 import os

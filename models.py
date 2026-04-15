@@ -63,8 +63,6 @@ class DeepSeekSession:
         max_history: int = 1000
     ):
         """
-        Инициализация новой сессии с сохранением контекста.
-        
         Args:
             api_key: API ключ DeepSeek
             base_url: URL API
