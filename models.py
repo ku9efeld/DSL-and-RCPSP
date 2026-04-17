@@ -20,7 +20,8 @@ class LLMModel(OpenAI):
         self.system_prompt_coder = 'You are an expert in resource constrained project scheduling problem algorithms.' \
                                 'Write clean, executable, production-ready Python code.'
         super().__init__(
-            api_key=os.environ["LITE_LLM_IAI"],
+
+            api_key=os.environ['LITE_LLM_BIG_MODELS'], #api_key=os.environ["LITE_LLM_IAI"] -- only IAI lab models
             base_url="https://api.duckduck.cloud/v1",
             max_retries=3
         )

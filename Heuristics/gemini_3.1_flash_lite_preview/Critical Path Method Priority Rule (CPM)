@@ -1,0 +1,142 @@
+import math
+from collections import defaultdict, deque
+
+def rcpsp_solver(jobs, resources_borders, communication_coefficient=None):
+    # EC0: Validate fields and unique IDs
+    job_map = {}
+    required_fields = {'id', 'demand_min', 'demand_max', 'work_volume', 'predecessors', 'priority'}
+    for job in jobs:
+        if not all(k in job for k in required_fields):
+            raise ValueError("Missing job fields")
+        if job['id'] in job_map:
+            raise ValueError("Duplicate job ID")
+        # Normalize predecessors
+        preds = job['predecessors']
+        if isinstance(preds, str):
+            job['predecessors'] = [preds] if preds else []
+        job_map[job['id']] = job
+
+    # EC1: Validate predecessor existence
+    for job in jobs:
+        for p in job['predecessors']:
+            if p not in job_map:
+                raise ValueError(f"Predecessor {p} not found")
+
+    # EC2: Cycle detection (Kahn's algorithm)
+    in_degree = {jid: 0 for jid in job_map}
+    adj = defaultdict(list)
+    for jid, job in job_map.items():
+        for p in job['predecessors']:
+            adj[p].append(jid)
+            in_degree[jid] += 1
+    
+    queue = deque([jid for jid, deg in in_degree.items() if deg == 0])
+    visited_count = 0
+    while queue:
+        u = queue.popleft()
+        visited_count += 1
+        for v in adj[u]:
+            in_degree[v] -= 1
+            if in_degree[v] == 0:
+                queue.append(v)
+    if visited_count != len(job_map):
+        raise ValueError("Cycle detected")
+
+    # CPM Backward Pass for LFT
+    lft = {jid: float('inf') for jid in job_map}
+    # Simple topological sort for backward pass
+    topo_order = []
+    temp_in_degree = {jid: len(job_map[jid]['predecessors']) for jid in job_map}
+    q = deque([jid for jid in job_map if not any(jid in job_map[o]['predecessors'] for o in job_map)])
+    while q:
+        u = q.popleft()
+        topo_order.append(u)
+        for p in job_map[u]['predecessors']:
+            temp_in_degree[p] -= 1
+            if temp_in_degree[p] == 0:
+                q.append(p)
+    
+    # Note 9: Feasibility check
+    if not resources_borders and jobs:
+        raise ValueError("No resources")
+    for jid, job in job_map.items():
+        feasible = False
+        for c in resources_borders:
+            if all(c['workers'].get(r, 0) >= job['demand_min'].get(r, 0) for r in job['work_volume'] if job['work_volume'][r] > 0):
+                feasible = True; break
+        if not feasible: raise ValueError("No feasible contractor")
+
+    # Scheduling state
+    current_time = 0
+    schedule = {}
+    execution_order = []
+    resource_usage = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    job_usage = {}
+    unscheduled = set(job_map.keys())
+    active_jobs = {} # jid: end_time
+    completed = set()
+    pending_preds = {jid: len(job_map[jid]['predecessors']) for jid in job_map}
+
+    def get_duration(job, allocated):
+        dur = 0
+        for r, vol in job['work_volume'].items():
+            if vol == 0 or (job['demand_min'].get(r, 0) == 0 and job['demand_max'].get(r, 0) == 0): continue
+            prod = allocated[r] * (communication_coefficient(allocated[r], job['demand_max'][r]) if communication_coefficient else 1)
+            dur = max(dur, math.ceil(vol / prod))
+        return dur
+
+    while unscheduled or active_jobs:
+        # 1. COMPLETE
+        finished = [jid for jid, end in active_jobs.items() if end <= current_time]
+        for jid in finished:
+            completed.add(jid)
+            for succ in adj[jid]:
+                pending_preds[succ] -= 1
+            del active_jobs[jid]
+
+        # 2. ELIGIBLE
+        eligible = [jid for jid in unscheduled if pending_preds[jid] == 0]
+        eligible.sort(key=lambda x: job_map[x]['priority'])
+
+        # 3. SCHEDULE
+        scheduled_any = False
+        for jid in eligible:
+            job = job_map[jid]
+            best_c = None
+            best_dur = 0
+            best_alloc = {}
+            
+            # EC4: Find best contractor
+            candidates = []
+            for c in resources_borders:
+                alloc = {r: min(job['demand_max'].get(r, 0), c['workers'].get(r, 0)) for r in job['work_volume']}
+                if not all(alloc.get(r, 0) >= job['demand_min'].get(r, 0) for r in job['work_volume'] if job['work_volume'][r] > 0): continue
+                
+                dur = get_duration(job, alloc)
+                # Check resource availability
+                feasible = True
+                for t in range(current_time, current_time + dur):
+                    for r, val in alloc.items():
+                        if c['workers'].get(r, 0) - resource_usage[c['id']][t][r] < val:
+                            feasible = False; break
+                    if not feasible: break
+                if feasible: candidates.append((c, dur, alloc))
+            
+            if candidates:
+                candidates.sort(key=lambda x: (sum(x[0]['workers'].values()), x[0]['id']))
+                c, dur, alloc = candidates[0]
+                for t in range(current_time, current_time + dur):
+                    for r, val in alloc.items(): resource_usage[c['id']][t][r] += val
+                schedule[jid] = (c['id'], current_time, current_time + dur)
+                active_jobs[jid] = current_time + dur
+                job_usage[jid] = alloc
+                execution_order.append(jid)
+                unscheduled.remove(jid)
+                scheduled_any = True
+
+        # 4. ADVANCE
+        if not scheduled_any:
+            if not active_jobs: raise ValueError("Deadlock")
+            current_time = min(active_jobs.values())
+
+    return schedule, execution_order, resource_usage, job_usage, current_time

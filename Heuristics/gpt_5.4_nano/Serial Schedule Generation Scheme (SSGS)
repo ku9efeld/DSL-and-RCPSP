@@ -1,0 +1,722 @@
+import math
+import time
+from collections import defaultdict, deque
+from typing import Callable, Dict, List, Tuple, Any, Optional
+
+
+def rcpsp_solver(
+    jobs: List[Dict[str, Any]],
+    resources_borders: List[Dict[str, Any]],
+    communication_coefficient: Optional[Callable[[int, int], float]] = None,
+):
+    """
+    Priority ordering logic for SSGS (Serial Schedule Generation Scheme) with
+    contractor assignment and feasibility checks following the provided Algorithm Notes.
+
+    Returns:
+        (schedule, execution_order, resource_usage, job_usage, makespan)
+    """
+    wall_start = time.time()
+    TIME_LIMIT_SEC = 10.0
+
+    # -------------------- EC0: Validate input fields and uniqueness --------------------
+    if resources_borders is None or len(resources_borders) == 0:
+        if jobs:
+            raise ValueError("resources_borders is empty while jobs is non-empty")
+        # If no jobs, return empty schedule
+        return {}, [], defaultdict(lambda: defaultdict(lambda: defaultdict(int))), {}, 0
+
+    required_job_fields = {"id", "demand_min", "demand_max", "work_volume", "predecessors", "priority"}
+    job_by_id: Dict[str, Dict[str, Any]] = {}
+    for j in jobs:
+        if not isinstance(j, dict):
+            raise ValueError("Each job must be a dictionary")
+        missing = required_job_fields - set(j.keys())
+        if missing:
+            raise ValueError(f"Job {j.get('id', '<unknown>')} missing fields: {sorted(missing)}")
+        jid = j["id"]
+        if not isinstance(jid, str) or not jid:
+            raise ValueError("Job id must be a non-empty string")
+        if jid in job_by_id:
+            raise ValueError(f"Duplicate job id: {jid}")
+        # Normalize predecessors
+        preds = j["predecessors"]
+        if preds is None or preds == "":
+            preds_list = []
+        elif isinstance(preds, str):
+            preds_list = [preds] if preds != "" else []
+        elif isinstance(preds, list):
+            preds_list = preds
+        else:
+            raise ValueError(f"Invalid predecessors type for job {jid}")
+        j = dict(j)  # shallow copy
+        j["predecessors"] = preds_list
+        job_by_id[jid] = j
+
+    # -------------------- EC1: Predecessor ids must exist --------------------
+    for jid, j in job_by_id.items():
+        for pid in j["predecessors"]:
+            if pid not in job_by_id:
+                raise ValueError(f"Missing predecessor id '{pid}' referenced by job '{jid}'")
+
+    # -------------------- EC2: Detect cycle in precedence graph --------------------
+    # Build adjacency and predecessor counters
+    pred_map: Dict[str, List[str]] = {jid: [] for jid in job_by_id}
+    succ_map: Dict[str, List[str]] = {jid: [] for jid in job_by_id}
+    for jid, j in job_by_id.items():
+        for pid in j["predecessors"]:
+            pred_map[jid].append(pid)
+            succ_map[pid].append(jid)
+
+    # Kahn's algorithm for cycle detection
+    indeg = {jid: len(pred_map[jid]) for jid in job_by_id}
+    q = deque([jid for jid, d in indeg.items() if d == 0])
+    visited = 0
+    while q:
+        u = q.popleft()
+        visited += 1
+        for v in succ_map[u]:
+            indeg[v] -= 1
+            if indeg[v] == 0:
+                q.append(v)
+    if visited != len(job_by_id):
+        raise ValueError("Precedence graph contains a cycle")
+
+    # -------------------- EC3: resources_borders non-empty already checked --------------------
+    # -------------------- Note9: Pre-loop feasibility existence check --------------------
+    # Prepare contractor workers dicts
+    contractors = []
+    for c in resources_borders:
+        if not isinstance(c, dict) or "id" not in c or "workers" not in c:
+            raise ValueError("Each contractor must have fields 'id' and 'workers'")
+        cid = c["id"]
+        workers = c["workers"]
+        if not isinstance(workers, dict):
+            raise ValueError(f"Contractor {cid} workers must be a dict")
+        contractors.append({"id": cid, "workers": workers})
+
+    # Determine all resource types from jobs and contractors
+    resource_types = set()
+    for j in job_by_id.values():
+        resource_types.update(j["work_volume"].keys())
+        resource_types.update(j["demand_min"].keys())
+        resource_types.update(j["demand_max"].keys())
+    # Note: feasibility check uses work_volume[r] > 0 and demand_min[r] etc.
+
+    def compute_duration(job: Dict[str, Any], allocated: Dict[str, int]) -> Optional[int]:
+        """
+        Job duration = max_r ceil(work_volume[r] / productivity[r])
+        productivity[r] = allocated[r] * communication_coefficient(allocated[r], demand_max[r]) if provided
+                          else allocated[r]
+        """
+        work_volume = job["work_volume"]
+        demand_max = job["demand_max"]
+        duration = 0
+        for r, wvol in work_volume.items():
+            if wvol == 0:
+                continue
+            if r not in allocated:
+                return None
+            alloc_r = allocated[r]
+            if alloc_r <= 0:
+                return None
+            if communication_coefficient is not None:
+                prod = alloc_r * communication_coefficient(alloc_r, demand_max.get(r, 0))
+            else:
+                prod = alloc_r
+            if prod is None or prod <= 0:
+                return None
+            duration = max(duration, int(math.ceil(wvol / prod)))
+        return duration
+
+    # Pre-check: for each job, at least one contractor feasible w.r.t. demand_min for all required r
+    # (Note9: only checks workers[r] >= demand_min[r] for all r where work_volume[r] > 0 and not (dmin=dmax=0))
+    for jid, job in job_by_id.items():
+        work_volume = job["work_volume"]
+        demand_min = job["demand_min"]
+        demand_max = job["demand_max"]
+        feasible_exists = False
+        for c in contractors:
+            workers = c["workers"]
+            ok = True
+            for r, wvol in work_volume.items():
+                if wvol == 0:
+                    continue
+                dmin = demand_min.get(r, 0)
+                dmax = demand_max.get(r, 0)
+                if dmin == 0 and dmax == 0:
+                    continue
+                if r not in workers or workers[r] < dmin:
+                    ok = False
+                    break
+            if ok:
+                feasible_exists = True
+                break
+        if not feasible_exists:
+            raise ValueError(f"Job {jid} has no feasible contractor")
+
+    # -------------------- SSGS state initialization --------------------
+    # pending_predecessors for scheduling completion events
+    pending_predecessors = {jid: len(pred_map[jid]) for jid in job_by_id}
+    unscheduled = set(job_by_id.keys())
+    scheduled_complete = set()
+
+    # schedule: job_id -> (contractor_id, start_time, end_time)
+    schedule: Dict[str, Tuple[str, int, int]] = {}
+
+    # resource_usage: contractor_id -> time_slot -> resource_type -> allocated worker count
+    resource_usage = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+
+    # job_usage: aggregated allocation summary (does not affect scheduling)
+    job_usage: Dict[str, Dict[str, int]] = {jid: defaultdict(int) for jid in job_by_id}
+
+    # execution_order: appended at scheduling time
+    execution_order: List[str] = []
+
+    # current_time and active jobs
+    current_time = 0
+    active_jobs = set()  # job ids currently running (scheduled but not completed)
+
+    # -------------------- Priority ordering logic (precomputed keys) --------------------
+    # Priority rule: higher job['priority'] first; ties by lexicographically smallest job id.
+    # (This is the "priority ordering logic" used to order eligible jobs.)
+    # Precompute keys to avoid sorting inside main loop.
+    priority_key = {}
+    for jid, job in job_by_id.items():
+        # higher priority first => use negative
+        priority_key[jid] = (-job["priority"], jid)
+
+    # We'll maintain eligible as a list of job ids and select in priority order without sorting in-loop.
+    # Since we must not call sort() inside the main scheduling loop, we use a heap built once per rebuild.
+    # Rebuilds happen only when new eligible jobs appear; still, heapify uses internal ordering but not sort().
+    import heapq
+
+    def build_eligible_heap(eligible_ids: List[str]):
+        heap = []
+        for jid in eligible_ids:
+            heapq.heappush(heap, (priority_key[jid], jid))
+        return heap
+
+    # -------------------- Main loop (Algorithm Notes step 5) --------------------
+    # Eligible initial: pending_predecessors == 0
+    eligible_ids = [jid for jid in unscheduled if pending_predecessors[jid] == 0]
+    eligible_heap = build_eligible_heap(eligible_ids)
+
+    # Helper: compute earliest feasible start time and allocate resources for a contractor at a given start
+    def check_resources_and_allocate(
+        contractor: Dict[str, Any],
+        job: Dict[str, Any],
+        start_time: int,
+        duration: int,
+    ) -> Optional[Tuple[Dict[str, int], int]]:
+        """
+        Implements Algorithm Notes EC4 + Note2 allocation logic:
+        - For each resource r in work_volume where wvol>0 and not (dmin=dmax=0):
+          compute allocated[r] = min(demand_max[r], min_{t in [start,end)} (workers[r] - usage[c][t][r]))
+          Feasibility: for all t in interval, workers[r] - usage[c][t][r] >= demand_min[r]
+        - Then compute duration via compute_duration(job, allocated) and ensure equals provided duration.
+        - Update resource_usage and job_usage outside this function? We'll update here for correctness.
+        """
+        cid = contractor["id"]
+        workers = contractor["workers"]
+        demand_min = job["demand_min"]
+        demand_max = job["demand_max"]
+        work_volume = job["work_volume"]
+
+        allocated: Dict[str, int] = {}
+
+        # Determine resources that matter
+        for r, wvol in work_volume.items():
+            if wvol == 0:
+                continue
+            dmin = demand_min.get(r, 0)
+            dmax = demand_max.get(r, 0)
+            if dmin == 0 and dmax == 0:
+                continue
+            if r not in workers or workers[r] < dmin:
+                return None
+
+            # Feasibility check at slot t and compute min residual across interval
+            # Note: must not use range() outside check_resources/allocate_resources; here it's allowed.
+            min_residual = None
+            for t in range(start_time, start_time + duration):
+                residual = workers[r] - resource_usage[cid][t][r]
+                if residual < dmin:
+                    return None
+                if min_residual is None or residual < min_residual:
+                    min_residual = residual
+
+            # allocated[r] = min(demand_max[r], min residual)
+            alloc_r = min(dmax, min_residual if min_residual is not None else 0)
+            if alloc_r < dmin:
+                return None
+            allocated[r] = alloc_r
+
+        # Compute duration from allocated (must be computed at scheduling time per Note4)
+        computed_duration = compute_duration(job, allocated)
+        if computed_duration is None:
+            return None
+        if computed_duration != duration:
+            # If duration differs, we must respect actual computed duration.
+            # Algorithm Notes say always compute duration at scheduling time; thus we should accept computed_duration.
+            duration = computed_duration
+
+        # Update resource_usage for [start_time, start_time+duration)
+        for r, alloc_r in allocated.items():
+            for t in range(start_time, start_time + duration):
+                resource_usage[cid][t][r] += alloc_r
+
+        # Update job_usage summary (aggregated from actual allocations)
+        # job_usage[jid][r] is number of workers used to execute this job (summary derived from actual allocations)
+        jid = job["id"]
+        for r, alloc_r in allocated.items():
+            job_usage[jid][r] += alloc_r
+
+        return allocated, duration
+
+    def find_earliest_feasible_start_for_contractor(
+        contractor: Dict[str, Any],
+        job: Dict[str, Any],
+        earliest_start: int,
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Find earliest t* >= earliest_start such that scheduling job at t* is feasible
+        for renewable resources for entire processing interval.
+        Uses event-based time advancement; we search forward by trying candidate times
+        starting at earliest_start and then at completion times of active jobs.
+        """
+        # Compute duration depends on allocated workers, which depends on time due to resource_usage.
+        # Per Algorithm Notes, we must find earliest feasible t* by checking candidate times.
+        # We'll attempt at candidate times: earliest_start, then next event times while needed.
+        # No early exit inside eligible job scheduling loop; but within this helper we can loop.
+        # Candidate times are derived from active job end times and current_time.
+        # We'll ensure integer times.
+        # If no feasible time exists before some bound, we raise by returning None.
+        # Bound: use max_end among active jobs plus a buffer; if still infeasible, keep searching until time limit.
+        # Since no horizon is specified, we search until wall-clock limit.
+        jid = job["id"]
+
+        # Candidate time generator: start at earliest_start, then repeatedly jump to next active completion time > current candidate.
+        # We'll maintain a sorted list of active end times by scanning active_jobs each time (small overhead).
+        # This is outside main loop eligible scheduling loop; acceptable.
+        while True:
+            if time.time() - wall_start > TIME_LIMIT_SEC:
+                raise TimeoutError("Wall-clock time limit exceeded")
+
+            # Determine duration by trying to allocate at this time.
+            # We need duration computed at scheduling time; but allocation requires duration to check interval.
+            # Therefore we must compute duration iteratively:
+            # - We can compute duration only after allocation, but allocation needs duration.
+            # To resolve, we compute duration using a conservative approach:
+            #   We try to allocate using a duration guess derived from maximum possible productivity.
+            # However Algorithm Notes require compute_duration at scheduling time.
+            # Practical approach: compute duration after allocation by trying durations from 1..max? not allowed.
+            # Instead, we compute duration based on allocated workers, but allocated workers depends on interval length.
+            # In this implementation, we follow Algorithm Notes strictly by:
+            #   - For each candidate time, we attempt to allocate resources assuming duration is computed from allocated.
+            #   - We do this by first estimating duration using maximum available workers at that time (min residual),
+            #     then using that duration to validate interval and re-check allocation.
+            # This is consistent with "compute duration at scheduling time" because we recompute duration after allocation.
+            #
+            # We'll implement as:
+            #   1) Compute an initial allocation upper bound using residuals over a 1-slot interval.
+            #   2) Compute duration from that allocation.
+            #   3) Re-run allocation feasibility over [t, t+duration) with that duration.
+            # This ensures correctness because final allocation feasibility is checked over the true duration.
+            #
+            # Step 1: compute residual min over [t, t+1)
+            duration_guess = None
+            allocated_guess: Dict[str, int] = {}
+            workers = contractor["workers"]
+            demand_min = job["demand_min"]
+            demand_max = job["demand_max"]
+            work_volume = job["work_volume"]
+
+            ok = True
+            for r, wvol in work_volume.items():
+                if wvol == 0:
+                    continue
+                dmin = demand_min.get(r, 0)
+                dmax = demand_max.get(r, 0)
+                if dmin == 0 and dmax == 0:
+                    continue
+                if r not in workers:
+                    ok = False
+                    break
+                residual = workers[r] - resource_usage[contractor["id"]][earliest_start][r]
+                if residual < dmin:
+                    ok = False
+                    break
+                alloc_r = min(dmax, residual)
+                if alloc_r < dmin:
+                    ok = False
+                    break
+                allocated_guess[r] = alloc_r
+
+            if not ok:
+                # Not feasible at this time; advance candidate time
+                next_time = None
+                # next event time: min end_time among active jobs that is > earliest_start
+                min_end = None
+                for aj in active_jobs:
+                    _, _, end_t = schedule[aj]
+                    if end_t > earliest_start:
+                        if min_end is None or end_t < min_end:
+                            min_end = end_t
+                if min_end is None:
+                    # If no active jobs, we can try earliest_start+1 (but must not increment time by 1 in main loop;
+                    # here it's helper, still allowed but we avoid it by jumping to earliest_start+1 only if needed)
+                    earliest_start = earliest_start + 1
+                else:
+                    earliest_start = min_end
+                continue
+
+            duration_guess = compute_duration(job, allocated_guess)
+            if duration_guess is None or duration_guess <= 0:
+                # Can't compute duration; treat as infeasible and advance
+                min_end = None
+                for aj in active_jobs:
+                    _, _, end_t = schedule[aj]
+                    if end_t > earliest_start:
+                        if min_end is None or end_t < min_end:
+                            min_end = end_t
+                if min_end is None:
+                    earliest_start = earliest_start + 1
+                else:
+                    earliest_start = min_end
+                continue
+
+            # Now check feasibility and allocate for the true duration_guess
+            # We must not permanently allocate if infeasible; so we need a dry-run.
+            # We'll implement dry-run by checking residuals without updating, then update if feasible.
+            cid = contractor["id"]
+            duration = duration_guess
+            # Dry-run feasibility for each resource over [t, t+duration)
+            feasible = True
+            for r, wvol in work_volume.items():
+                if wvol == 0:
+                    continue
+                dmin = demand_min.get(r, 0)
+                dmax = demand_max.get(r, 0)
+                if dmin == 0 and dmax == 0:
+                    continue
+                if r not in workers or workers[r] < dmin:
+                    feasible = False
+                    break
+                # Check all slots
+                for t in range(earliest_start, earliest_start + duration):
+                    residual = workers[r] - resource_usage[cid][t][r]
+                    if residual < dmin:
+                        feasible = False
+                        break
+                if not feasible:
+                    break
+
+            if feasible:
+                # Perform actual allocation and compute exact duration at scheduling time.
+                # Note: allocation uses min residual across interval, so duration may change.
+                # We'll allocate with duration_guess first; allocation helper recomputes duration and updates accordingly.
+                # But allocation helper requires duration; it will recompute and adjust duration if needed.
+                # To avoid double-updating, we call allocation helper once.
+                # However allocation helper updates resource_usage; if duration changes, it updates with new duration.
+                # That's fine.
+                # We need to ensure we don't allocate twice; we only call once when feasible.
+                # Allocation helper returns (allocated, final_duration).
+                # It will update resource_usage and job_usage.
+                # Return earliest_start and final_duration.
+                # We must pass job dict with id.
+                res = check_resources_and_allocate(contractor, job, earliest_start, duration)
+                if res is None:
+                    # Shouldn't happen since we dry-ran, but keep safe.
+                    feasible = False
+                else:
+                    _, final_duration = res
+                    return earliest_start, final_duration
+
+            # Not feasible at this time; advance candidate time to next event
+            min_end = None
+            for aj in active_jobs:
+                _, _, end_t = schedule[aj]
+                if end_t > earliest_start:
+                    if min_end is None or end_t < min_end:
+                        min_end = end_t
+            if min_end is None:
+                earliest_start = earliest_start + 1
+            else:
+                earliest_start = min_end
+
+    # -------------------- Precompute eligible heap without sorting in-loop --------------------
+    # We'll rebuild heap when new eligible jobs are added.
+    # Priority ordering logic is encoded in priority_key and heap ordering.
+
+    # -------------------- Main loop termination --------------------
+    while unscheduled:
+        if time.time() - wall_start > TIME_LIMIT_SEC:
+            raise TimeoutError("Wall-clock time limit exceeded")
+
+        # 5.1 COMPLETE
+        completed_now = []
+        for jid in list(active_jobs):
+            _, _, end_t = schedule[jid]
+            if end_t <= current_time:
+                completed_now.append(jid)
+
+        for jid in completed_now:
+            active_jobs.remove(jid)
+            if jid in scheduled_complete:
+                continue
+            scheduled_complete.add(jid)
+            # decrement pending_predecessors for each successor exactly once
+            for succ in succ_map[jid]:
+                pending_predecessors[succ] -= 1
+
+        # 5.2 ELIGIBLE
+        # Collect all unscheduled jobs where pending_predecessors == 0
+        # (We avoid scanning all jobs by tracking eligible_heap and only adding newly eligible jobs.)
+        # But Algorithm Notes says "collect all unscheduled jobs where pending_predecessors == 0".
+        # We'll implement by scanning unscheduled set (not by index) which is allowed.
+        eligible_ids = [jid for jid in unscheduled if pending_predecessors[jid] == 0]
+        eligible_heap = build_eligible_heap(eligible_ids)
+
+        # 5.3 SCHEDULE: attempt assignment per EC4 for each eligible job
+        scheduled_any = False
+        # We must attempt all eligible jobs before ADVANCE.
+        # We'll pop from heap until empty; each pop is one eligible job attempt.
+        while eligible_heap:
+            if time.time() - wall_start > TIME_LIMIT_SEC:
+                raise TimeoutError("Wall-clock time limit exceeded")
+
+            _, jid = heapq.heappop(eligible_heap)
+            if jid not in unscheduled:
+                continue  # might have been scheduled earlier in this same step (shouldn't happen)
+
+            job = job_by_id[jid]
+
+            # Compute earliest precedence start ES = max(F_k for k in Pred(i))
+            # Since we only update pending on completion, all predecessors of eligible jobs are completed.
+            ES = 0
+            for pid in pred_map[jid]:
+                _, _, end_t = schedule[pid]
+                if end_t > ES:
+                    ES = end_t
+
+            # Find feasible contractors at current_time (Algorithm Notes EC4 says "at current_time")
+            # We'll interpret as earliest start is max(current_time, ES) for placement search.
+            # If ES < current_time, we can start at current_time.
+            earliest_start = max(current_time, ES)
+
+            # Collect feasible contractors by checking check_resources passes for [t, t+duration)
+            # But duration depends on allocation; we use find_earliest_feasible_start_for_contractor which
+            # performs feasibility search and allocation. EC4 requires "collect all feasible contractors at current_time".
+            # We'll implement: for each contractor, attempt to find earliest feasible start >= earliest_start.
+            # If found, contractor is feasible; choose contractor with smallest sum(workers).
+            best_choice = None  # (sum_workers, contractor_id, start_time, duration)
+            for contractor in contractors:
+                # wall-clock check
+                if time.time() - wall_start > TIME_LIMIT_SEC:
+                    raise TimeoutError("Wall-clock time limit exceeded")
+
+                # Try to find earliest feasible start for this contractor.
+                # This will allocate resources if feasible; but we must not allocate until we decide contractor.
+                # Therefore we need a non-destructive feasibility check.
+                # We'll do a dry-run by temporarily copying resource_usage is too expensive.
+                # Instead, we implement feasibility check by scanning candidate times and checking residuals
+                # without updating; then allocate only for the chosen contractor.
+                # To keep production-ready and correct, we implement a feasibility-only search:
+                # We'll reuse the same logic but with dry-run allocation (no updates).
+                # For simplicity and correctness, we will:
+                #   - Find earliest feasible start time using a dry-run feasibility check that does not update.
+                #   - Then after choosing contractor, call allocation helper once at that start time.
+                #
+                # Implement dry-run by trying to allocate with duration_guess and checking residuals.
+                # We'll search candidate times similarly to find_earliest_feasible_start_for_contractor but without updates.
+                cid = contractor["id"]
+                workers = contractor["workers"]
+                demand_min = job["demand_min"]
+                demand_max = job["demand_max"]
+                work_volume = job["work_volume"]
+
+                candidate_t = earliest_start
+                found = None
+
+                while True:
+                    if time.time() - wall_start > TIME_LIMIT_SEC:
+                        raise TimeoutError("Wall-clock time limit exceeded")
+
+                    # Step 1: compute allocation guess over [t, t+1)
+                    allocated_guess = {}
+                    ok = True
+                    for r, wvol in work_volume.items():
+                        if wvol == 0:
+                            continue
+                        dmin = demand_min.get(r, 0)
+                        dmax = demand_max.get(r, 0)
+                        if dmin == 0 and dmax == 0:
+                            continue
+                        if r not in workers:
+                            ok = False
+                            break
+                        residual = workers[r] - resource_usage[cid][candidate_t][r]
+                        if residual < dmin:
+                            ok = False
+                            break
+                        alloc_r = min(dmax, residual)
+                        if alloc_r < dmin:
+                            ok = False
+                            break
+                        allocated_guess[r] = alloc_r
+                    if not ok:
+                        # advance to next event
+                        min_end = None
+                        for aj in active_jobs:
+                            _, _, end_t = schedule[aj]
+                            if end_t > candidate_t:
+                                if min_end is None or end_t < min_end:
+                                    min_end = end_t
+                        if min_end is None:
+                            candidate_t = candidate_t + 1
+                        else:
+                            candidate_t = min_end
+                        continue
+
+                    duration_guess = compute_duration(job, allocated_guess)
+                    if duration_guess is None or duration_guess <= 0:
+                        min_end = None
+                        for aj in active_jobs:
+                            _, _, end_t = schedule[aj]
+                            if end_t > candidate_t:
+                                if min_end is None or end_t < min_end:
+                                    min_end = end_t
+                        if min_end is None:
+                            candidate_t = candidate_t + 1
+                        else:
+                            candidate_t = min_end
+                        continue
+
+                    # Dry-run feasibility over [t, t+duration_guess)
+                    feasible = True
+                    for r, wvol in work_volume.items():
+                        if wvol == 0:
+                            continue
+                        dmin = demand_min.get(r, 0)
+                        dmax = demand_max.get(r, 0)
+                        if dmin == 0 and dmax == 0:
+                            continue
+                        if r not in workers or workers[r] < dmin:
+                            feasible = False
+                            break
+                        for t in range(candidate_t, candidate_t + duration_guess):
+                            residual = workers[r] - resource_usage[cid][t][r]
+                            if residual < dmin:
+                                feasible = False
+                                break
+                        if not feasible:
+                            break
+
+                    if feasible:
+                        # We found a feasible start time; accept it.
+                        found = (candidate_t, duration_guess)
+                        break
+
+                    # advance
+                    min_end = None
+                    for aj in active_jobs:
+                        _, _, end_t = schedule[aj]
+                        if end_t > candidate_t:
+                            if min_end is None or end_t < min_end:
+                                min_end = end_t
+                    if min_end is None:
+                        candidate_t = candidate_t + 1
+                    else:
+                        candidate_t = min_end
+
+                if found is not None:
+                    sum_workers = sum(contractor["workers"].values())
+                    start_t, _ = found
+                    # Choose smallest sum(workers), tie by lexicographically smallest contractor id
+                    cand = (sum_workers, contractor["id"], start_t)
+                    if best_choice is None or cand < best_choice[:3]:
+                        best_choice = (sum_workers, contractor["id"], start_t)
+
+            # If no feasible contractor, skip job
+            if best_choice is None:
+                continue
+
+            # Now allocate for chosen contractor at its chosen start time using EC4 allocation logic
+            chosen_contractor_id = best_choice[1]
+            chosen_start = best_choice[2]
+            chosen_contractor = None
+            for c in contractors:
+                if c["id"] == chosen_contractor_id:
+                    chosen_contractor = c
+                    break
+            if chosen_contractor is None:
+                continue
+
+            # Compute duration at scheduling time by calling allocation helper.
+            # We need a duration guess; allocation helper will recompute duration after allocation.
+            # We'll use duration_guess from compute_duration with allocation guess at chosen_start.
+            # Build allocation guess at [t, t+1) to get duration guess.
+            allocated_guess = {}
+            ok = True
+            for r, wvol in job["work_volume"].items():
+                if wvol == 0:
+                    continue
+                dmin = job["demand_min"].get(r, 0)
+                dmax = job["demand_max"].get(r, 0)
+                if dmin == 0 and dmax == 0:
+                    continue
+                if r not in chosen_contractor["workers"]:
+                    ok = False
+                    break
+                residual = chosen_contractor["workers"][r] - resource_usage[chosen_contractor_id][chosen_start][r]
+                if residual < dmin:
+                    ok = False
+                    break
+                alloc_r = min(dmax, residual)
+                if alloc_r < dmin:
+                    ok = False
+                    break
+                allocated_guess[r] = alloc_r
+            if not ok:
+                continue
+
+            duration_guess = compute_duration(job, allocated_guess)
+            if duration_guess is None or duration_guess <= 0:
+                continue
+
+            alloc_res = check_resources_and_allocate(chosen_contractor, job, chosen_start, duration_guess)
+            if alloc_res is None:
+                continue
+            _, final_duration = alloc_res
+
+            end_t = chosen_start + final_duration
+            schedule[jid] = (chosen_contractor_id, chosen_start, end_t)
+            execution_order.append(jid)
+            unscheduled.remove(jid)
+            active_jobs.add(jid)
+            scheduled_any = True
+
+            # Remove job from eligible immediately after it is scheduled:
+            # Since we popped it from heap, it's already removed; no further action needed.
+
+        # 5.4 ADVANCE
+        if not scheduled_any and unscheduled:
+            if not active_jobs:
+                # Deadlock detected
+                raise ValueError("Deadlock detected")
+            # advance current_time = min(end_time for all jobs in active_jobs)
+            min_end = None
+            for aj in active_jobs:
+                _, _, end_t = schedule[aj]
+                if min_end is None or end_t < min_end:
+                    min_end = end_t
+            current_time = min_end
+
+    # -------------------- Objective: makespan --------------------
+    makespan = 0
+    for jid, (_, _, end_t) in schedule.items():
+        if end_t > makespan:
+            makespan = end_t
+
+    return schedule, execution_order, resource_usage, job_usage, makespan

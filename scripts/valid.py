@@ -47,11 +47,11 @@ def check_predecessors(schedule, jobs):
 
     for job_id, (contractor_id, start_time, end_time) in schedule.items():
         job = job_by_id.get(job_id)
-        # if job is None:
-        #     # В расписании есть работа, которой нет в описании jobs
-        #     violations.append(job_id)
-        #     continue
-
+        if job is None:
+            # В расписании есть работа, которой нет в описании jobs
+            violations.append(job_id)
+            continue
+        
         preds = job.get("predecessors", [])
         if isinstance(preds, str):
             preds = [] if preds == "" else [preds]

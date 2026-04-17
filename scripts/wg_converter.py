@@ -122,16 +122,10 @@ class ProjectConverter:
         order_sampo = order_nodes_by_start_time(schedule_works, self.work_graph)
         return self.get_graph(order_sampo)
         
-    def to_chromosome(self, schedule, order, job_usage, makespan):
+    def output_to_chromosome(self, schedule, order, job_usage, makespan):
         schedule_object = self.to_schedule(schedule, order, job_usage, makespan)
-        schedule_works = iter(schedule_object.to_schedule_work_dict.values())
-        order_sampo = order_nodes_by_start_time(schedule_works, self.work_graph)
-        return convert_schedule_to_chromosome(self.work_id2index, self.worker_name2index,
-                                               self.contractor2index, self.contractor_borders, 
-                                               schedule_object, 
-                                               self.spec, self.landscape, 
-                                               self.get_graph(order_sampo)
-                                               )
+        return self.to_chromosome(schedule_object)
+    
     def to_chromosome(self, schedule_object):
         schedule_works = iter(schedule_object.to_schedule_work_dict.values())
         order_sampo = order_nodes_by_start_time(schedule_works, self.work_graph)

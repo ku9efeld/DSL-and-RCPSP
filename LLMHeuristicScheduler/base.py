@@ -71,6 +71,7 @@ class LLMHeuristicScheduler(GeneticScheduler):
             schedule_obj = project_converter.to_schedule(schedule, order, job_usage, makespan)
             graph_nodes = project_converter.get_list_graph_nodes(schedule_obj)
             if validate_schedule_bool(schedule_obj, work_graph, contractors, spec):
+                print('+1 solve', method, makespan)
                 population[method] = (schedule_obj, graph_nodes, spec, self.imprt)  # Schedule, list(GraphNode), Spec, weight
         return population
     
@@ -96,9 +97,9 @@ class LLMHeuristicScheduler(GeneticScheduler):
                         chromosomes.append(chrm)
                 return chromosomes[:n]
 
-            case "test1":
+            case "switchLFTrand":
                 pass
-            case "test2":
+            case "switch_":
                 pass
   
         return None
