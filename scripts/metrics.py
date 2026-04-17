@@ -1,4 +1,6 @@
 import numpy as np
+import re
+import logging
 
 
 def distance_matrices(solutions):
@@ -113,146 +115,28 @@ def distance_matrices(solutions):
 
     return solvers, D_contractor, D_interval, D_resource, D_order
 
-from math import inf
+class StatsCollector:
+    def __init__(self,):
+        self.items = []
 
-def summarize_runs_main(runs):
-    """
-    runs: список run-ов main-алгоритма (algs_history['genetic']),
-          каждый run — список точек с 'best_fitness' и 'generation'.
+    def add(self, fitness):
+        self.items.append(fitness)
+    def clear(self):
+        self.items = []
 
-    Возвращает по каждому run:
-      {
-        'main_best_fitness': float | None,
-        'main_best_gen': int | None,
-      }
-    """
-    summaries = []
-    for run_history in runs:
-        vals = [
-            x for x in run_history
-            if isinstance(x, dict)
-            and 'best_fitness' in x
-            and x['best_fitness'] != inf
-        ]
-        if not vals:
-            summaries.append({
-                'main_best_fitness': None,
-                'main_best_gen': None,
-            })
-            continue
+class StatsHandler(logging.Handler):
+    pattern = re.compile(
+        r"-- Generation (?P<generation>\d+), population=(?P<population>\d+), best fitness=\((?P<fitness>\d+)\.0,\) --"
+    )
+    def __init__(self, collector):
+        super().__init__()
+        self.collector = collector  # сюда кладём внешний объект
+    def emit(self, record):
+        msg = self.format(record)
+        m = self.pattern.search(msg)
+        if not m:
+            return
+        #generation = int(m.group("generation"))
+        fitness = float(m.group("fitness"))
+        self.collector.add(fitness)
 
-        best = min(vals, key=lambda x: x['best_fitness'])
-        summaries.append({
-            'main_best_fitness': best['best_fitness'],
-            'main_best_gen': best['generation'],
-        })
-    return summaries
-
-
-def metrics_by_init_population(
-    main_summary,
-    test_runs):
-    """
-    main_summary: результат summarize_runs_main(algs_history['genetic'])
-    test_runs: сравниваемый ГА 
-
-    Возвращает список per_run с полями:
-      - main_best_fitness, main_best_gen
-      - test_best_fitness, test_best_gen
-      - reached_main_level, gen_to_main_level, delta_gen_to_main
-      - found_better_than_main, gen_to_better, delta_gen_to_better
-      - gain_improve
-    """
-    assert len(main_summary) == len(test_runs)
-    num_runs = len(test_runs)
-
-    per_run = []
-
-    for i in range(num_runs):
-        ms = main_summary[i]
-        main_best = ms['main_best_fitness']
-        main_gen  = ms['main_best_gen']
-
-        vals = [
-            x for x in test_runs[i]
-            if isinstance(x, dict)
-            and 'best_fitness' in x
-            and x['best_fitness'] != inf
-        ]
-
-        # Сортируем точки по поколениям
-        vals = sorted(vals, key=lambda x: x['generation'])
-
-        # лучший теста
-        best_test = min(vals, key=lambda x: x['best_fitness'])
-        test_best_fitness = best_test['best_fitness']
-        test_best_gen = best_test['generation']
-
-        # 1) достиг ли уровня main (best_fitness <= main_best) и когда впервые
-        gen_to_main = None
-        for rec in vals:
-            if rec['best_fitness'] <= main_best:
-                gen_to_main = rec['generation']
-                break
-
-        if gen_to_main is not None:
-            reached_main_level = True
-            delta_gen_to_main = gen_to_main - main_gen  # <0 → тест достиг уровня main раньше
-        else:
-            reached_main_level = False
-            delta_gen_to_main = None
-
-        # 2) нашёл ли лучше, чем main (best_fitness < main_best) и когда впервые
-        gen_to_better = None
-        for rec in vals:
-            if rec['best_fitness'] < main_best:
-                gen_to_better = rec['generation']
-                break
-
-        if gen_to_better is not None:
-            found_better_than_main = True
-            delta_gen_to_better = gen_to_better - main_gen  # <0 → тест раньше нашёл лучшую точку, чем main дошёл до своей
-        else:
-            found_better_than_main = False
-            delta_gen_to_better = None
-
-        # 3) gain_improve = max((main_best - test_best_fitness) / main_best, 0)
-        if main_best is not None and main_best != 0:
-            raw_gain = (main_best - test_best_fitness) * 100/ main_best
-            gain_improve = max(raw_gain, 0.0)
-        else:
-            gain_improve = 0.0
-
-        per_run.append({
-            'run_index': i,
-            'main_best_fitness': main_best,
-            'main_best_gen': main_gen,
-            'test_best_fitness': test_best_fitness,
-            'test_best_gen': test_best_gen,
-            'reached_main_level': reached_main_level,
-            'gen_to_main_level': gen_to_main,
-            'delta_gen_to_main': delta_gen_to_main,
-            'found_better_than_main': found_better_than_main,
-            'gen_to_better': gen_to_better,
-            'delta_gen_to_better': delta_gen_to_better,
-            'gain_improve': gain_improve
-        })
-
-    return per_run
-
-def aggregate_metrics(all_runs):
-    reached_flags = [r['reached_main_level'] for r in all_runs]
-    better_flags = [r['found_better_than_main'] for r in all_runs]
-    gains = [r['gain_improve'] for r in all_runs]
-
-    delta_main = [r['delta_gen_to_main'] for r in all_runs if r['delta_gen_to_main'] is not None]
-    delta_better = [r['delta_gen_to_better'] for r in all_runs if r['delta_gen_to_better'] is not None]
-
-    return {
-        'success_rate': float(100 * np.mean([1.0 if f else 0.0 for f in reached_flags])),
-        'found_better_rate': float(100 * np.mean([1.0 if f else 0.0 for f in better_flags])),
-        'mean_delta_gen_to_main': float(np.mean(delta_main)) if delta_main else None,
-        'mean_delta_gen_to_better': float(np.mean(delta_better)) if delta_better else None,
-        'mean_gain_improve': round(float(np.mean(gains)) if gains else 0.0, 1),
-        'count_gain_improve': np.sum([1 if g > 0 else 0 for g in gains]) if gains else 0.0,
-    }

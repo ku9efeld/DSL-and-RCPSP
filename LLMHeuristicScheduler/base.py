@@ -5,8 +5,11 @@ import json
 import math
 import random as rand
 from scripts.valid import validate_schedule_bool, interpter_solver
+from sampo_api import create_mvp_toolbox
+
 # SAMPO
 from sampo.scheduler.genetic import GeneticScheduler
+from sampo.scheduler.genetic.operators import TimeFitness
 from sampo.scheduler.genetic.schedule_builder import build_schedules, build_schedules_with_cache
 from sampo.schemas.schedule import Schedule
 from sampo.schemas.schedule_spec import ScheduleSpec
@@ -14,6 +17,15 @@ from sampo.schemas.landscape import LandscapeConfiguration
 from sampo.utilities.validation import validate_schedule
 from sampo.schemas.time import Time
 
+
+class Evaluator():
+    def __init__(self, work_graph, contractors, f = TimeFitness()):
+        self.toolbox = create_mvp_toolbox(work_graph, contractors)
+        self.fitness_func = f
+    def makespan(self, chromosome):
+        makespan = self.fitness_func.evaluate(chromosome, evaluator=self.toolbox.evaluate_chromosome)[0]
+        return makespan
+    
 
 class LLMHeuristicScheduler(GeneticScheduler):
     def __init__(self,
@@ -64,15 +76,17 @@ class LLMHeuristicScheduler(GeneticScheduler):
     
     def generate_llm_init_population(self, work_graph, contractors, spec = ScheduleSpec()):
         data = self.to_input_solver(work_graph, contractors)
-        project_converter = ProjectConverter(work_graph, contractors)
+        project_converter, eval = ProjectConverter(work_graph, contractors), Evaluator(work_graph, contractors)
         population = {}
         for method, code in self.llm_heuristics.items():
             schedule, order, _, job_usage,  makespan = interpter_solver(method, code, data)
             schedule_obj = project_converter.to_schedule(schedule, order, job_usage, makespan)
             graph_nodes = project_converter.get_list_graph_nodes(schedule_obj)
             if validate_schedule_bool(schedule_obj, work_graph, contractors, spec):
-                print('+1 solve', method, makespan)
-                population[method] = (schedule_obj, graph_nodes, spec, self.imprt)  # Schedule, list(GraphNode), Spec, weight
+                # Проверка, что TimeEst работ совпадает между SAMPO / внутренним подсчетом в эвристике, по makespan
+                if eval.makespan(project_converter.to_chromosome(schedule_obj)) == makespan:
+                    print(makespan)
+                    population[method] = (schedule_obj, graph_nodes, spec, self.imprt)  # Schedule, list(GraphNode), Spec, weight
         return population
     
 
