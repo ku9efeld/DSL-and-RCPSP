@@ -1,0 +1,365 @@
+# SOURCE: generation_model='Heuristics/claude_sonnet_4.6', original_file='Longest Processing Time Priority Rule (LPT)'
+
+import math
+import time as time_module
+from collections import defaultdict, deque
+
+
+def rcpsp_solver(jobs, resources_borders, communication_coefficient=None):
+    start_wall = time_module.time()
+
+    # ─── EC0: validate fields and unique ids ───────────────────────────────────
+    required_fields = {"id", "demand_min", "demand_max", "work_volume", "predecessors", "priority"}
+    seen_ids = set()
+    for job in jobs:
+        missing = required_fields - set(job.keys())
+        if missing:
+            raise ValueError(f"Job missing fields: {missing}")
+        jid = job["id"]
+        if jid in seen_ids:
+            raise ValueError(f"Duplicate job id: {jid}")
+        seen_ids.add(jid)
+
+    # ─── Parse & normalize ────────────────────────────────────────────────────
+    job_map = {}
+    for job in jobs:
+        j = dict(job)
+        preds = j["predecessors"]
+        if isinstance(preds, str):
+            j["predecessors"] = [] if preds == "" else [preds]
+        else:
+            j["predecessors"] = list(preds)
+        job_map[j["id"]] = j
+
+    # ─── EC1: missing predecessor ids ─────────────────────────────────────────
+    for jid, job in job_map.items():
+        for pid in job["predecessors"]:
+            if pid not in job_map:
+                raise ValueError(f"Predecessor '{pid}' of job '{jid}' not found")
+
+    # ─── EC2: cycle detection (Kahn's algorithm) ──────────────────────────────
+    in_degree = {jid: 0 for jid in job_map}
+    successors_map = {jid: [] for jid in job_map}
+    for jid, job in job_map.items():
+        for pid in job["predecessors"]:
+            successors_map[pid].append(jid)
+            in_degree[jid] += 1
+
+    queue = deque(jid for jid, d in in_degree.items() if d == 0)
+    topo_order = []
+    temp_in = dict(in_degree)
+    while queue:
+        node = queue.popleft()
+        topo_order.append(node)
+        for s in successors_map[node]:
+            temp_in[s] -= 1
+            if temp_in[s] == 0:
+                queue.append(s)
+    if len(topo_order) != len(job_map):
+        raise ValueError("Cycle detected in precedence graph")
+
+    # ─── EC3: empty contractors ────────────────────────────────────────────────
+    if not resources_borders and job_map:
+        raise ValueError("No contractors available but jobs exist")
+
+    contractor_map = {c["id"]: c for c in resources_borders}
+
+    # ─── Helper: effective resource types for a job ───────────────────────────
+    def effective_resources(job):
+        result = []
+        for r, wv in job["work_volume"].items():
+            dmin = job["demand_min"].get(r, 0)
+            dmax = job["demand_max"].get(r, 0)
+            if wv == 0 and dmin == 0 and dmax == 0:
+                continue
+            if dmin == 0 and dmax == 0:
+                continue
+            result.append(r)
+        return result
+
+    # ─── Helper: compute duration ─────────────────────────────────────────────
+    def compute_duration(job, allocated):
+        max_dur = 0
+        for r, wv in job["work_volume"].items():
+            dmin = job["demand_min"].get(r, 0)
+            dmax = job["demand_max"].get(r, 0)
+            if wv == 0 and dmin == 0 and dmax == 0:
+                continue
+            if dmin == 0 and dmax == 0:
+                continue
+            alloc = allocated.get(r, 0)
+            if alloc <= 0:
+                return None
+            if communication_coefficient is not None:
+                prod = alloc * communication_coefficient(alloc, dmax)
+            else:
+                prod = alloc
+            if prod <= 0:
+                return None
+            dur = math.ceil(wv / prod)
+            if dur > max_dur:
+                max_dur = dur
+        return max_dur if max_dur > 0 else 0
+
+    # ─── resource_usage structure ─────────────────────────────────────────────
+    resource_usage = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: 0)))
+
+    def check_resources(contractor_id, workers, start_time, end_time, demand_min, demand_max, eff_resources):
+        """Check feasibility and compute allocated workers."""
+        allocated = {}
+        for r in eff_resources:
+            if r not in workers:
+                return None
+            if workers[r] < demand_min.get(r, 0):
+                return None
+            min_avail = workers[r]
+            for t in range(start_time, end_time):
+                avail = workers[r] - resource_usage[contractor_id][t][r]
+                if avail < demand_min.get(r, 0):
+                    return None
+                if avail < min_avail:
+                    min_avail = avail
+            alloc = min(demand_max.get(r, demand_min.get(r, 0)), min_avail)
+            allocated[r] = alloc
+        return allocated
+
+    def allocate_resources(contractor_id, start_time, end_time, allocated):
+        for r, alloc in allocated.items():
+            for t in range(start_time, end_time):
+                resource_usage[contractor_id][t][r] += alloc
+
+    # ─── Note 9: pre-loop feasibility check ───────────────────────────────────
+    for jid, job in job_map.items():
+        eff = effective_resources(job)
+        if not eff:
+            continue
+        feasible = False
+        for c in resources_borders:
+            workers = c["workers"]
+            ok = True
+            for r in eff:
+                if r not in workers or workers[r] < job["demand_min"].get(r, 0):
+                    ok = False
+                    break
+            if ok:
+                feasible = True
+                break
+        if not feasible:
+            raise ValueError(f"No feasible contractor for job '{jid}'")
+
+    # ─── Precompute priority keys (LPT: descending duration, tie-break by id) ─
+    # For LPT we need a representative duration. Use demand_max with first contractor
+    # that is feasible (static estimate only for sorting).
+    def estimate_duration(job):
+        eff = effective_resources(job)
+        if not eff:
+            return 0
+        best = None
+        for c in resources_borders:
+            workers = c["workers"]
+            allocated = {}
+            ok = True
+            for r in eff:
+                if r not in workers or workers[r] < job["demand_min"].get(r, 0):
+                    ok = False
+                    break
+                alloc = min(job["demand_max"].get(r, 0), workers[r])
+                allocated[r] = alloc
+            if not ok:
+                continue
+            dur = compute_duration(job, allocated)
+            if dur is not None:
+                if best is None or dur > best:
+                    best = dur
+        return best if best is not None else 0
+
+    priority_key = {}
+    for jid, job in job_map.items():
+        est_dur = estimate_duration(job)
+        priority_key[jid] = (-est_dur, jid)  # descending duration, then lex id
+
+    # ─── Forward pass: EST ────────────────────────────────────────────────────
+    est = {jid: 0 for jid in job_map}
+    for jid in topo_order:
+        job = job_map[jid]
+        for pid in job["predecessors"]:
+            p_dur = estimate_duration(job_map[pid])
+            candidate = est[pid] + p_dur
+            if candidate > est[jid]:
+                est[jid] = candidate
+
+    # ─── Backward pass: LFT ───────────────────────────────────────────────────
+    max_est = max((est[jid] + estimate_duration(job_map[jid])) for jid in job_map) if job_map else 0
+    lft = {jid: max_est for jid in job_map}
+    for jid in reversed(topo_order):
+        for sid in successors_map[jid]:
+            s_dur = estimate_duration(job_map[sid])
+            candidate = lft[sid] - s_dur
+            if candidate < lft[jid]:
+                lft[jid] = candidate
+
+    # ─── Initialize scheduling state ──────────────────────────────────────────
+    schedule = {}
+    execution_order = []
+    job_usage = {}
+
+    pending_predecessors = {jid: len(job_map[jid]["predecessors"]) for jid in job_map}
+    unscheduled = set(job_map.keys())
+    completed = set()
+    active_jobs = {}  # jid -> end_time
+
+    current_time = 0
+
+    # Pre-sort eligible candidates by priority key (done once, maintained as sorted list)
+    # We'll use a sorted list approach; since we can't sort inside the loop,
+    # we precompute the sorted order and filter dynamically.
+    sorted_job_ids = sorted(job_map.keys(), key=lambda jid: priority_key[jid])
+
+    # ─── Main scheduling loop ─────────────────────────────────────────────────
+    while unscheduled:
+        if time_module.time() - start_wall > 10:
+            raise TimeoutError("rcpsp_solver exceeded 10-second wall-clock limit")
+
+        # Step 1: COMPLETE
+        newly_completed = [jid for jid, job in schedule.items()
+                           if job[2] <= current_time and jid not in completed]
+        for jid in newly_completed:
+            completed.add(jid)
+            if jid in active_jobs:
+                del active_jobs[jid]
+            for sid in successors_map[jid]:
+                pending_predecessors[sid] -= 1
+
+        # Step 2: ELIGIBLE
+        eligible = [jid for jid in unscheduled if pending_predecessors[jid] == 0]
+
+        # Step 3: SCHEDULE (iterate in LPT order using precomputed sorted_job_ids)
+        scheduled_any = False
+        for jid in sorted_job_ids:
+            if jid not in unscheduled:
+                continue
+            if pending_predecessors[jid] != 0:
+                continue
+            if jid not in set(eligible):
+                continue
+
+            job = job_map[jid]
+            eff = effective_resources(job)
+
+            # Collect feasible contractors
+            feasible_contractors = []
+            for c in resources_borders:
+                cid = c["id"]
+                workers = c["workers"]
+
+                # Check static feasibility
+                static_ok = True
+                for r in eff:
+                    if r not in workers or workers[r] < job["demand_min"].get(r, 0):
+                        static_ok = False
+                        break
+                if not static_ok:
+                    continue
+
+                # Compute duration with a preliminary allocation estimate
+                # First estimate allocated at current_time with duration=1 to get alloc
+                # We need to do a two-pass: estimate duration, then check resources
+                # Use demand_max as initial estimate for duration
+                prelim_allocated = {}
+                prelim_ok = True
+                for r in eff:
+                    alloc = min(job["demand_max"].get(r, 0), workers[r])
+                    if alloc < job["demand_min"].get(r, 0):
+                        prelim_ok = False
+                        break
+                    prelim_allocated[r] = alloc
+                if not prelim_ok:
+                    continue
+
+                prelim_dur = compute_duration(job, prelim_allocated)
+                if prelim_dur is None:
+                    continue
+
+                # Now check actual resource availability for [current_time, current_time+prelim_dur)
+                # and compute actual allocated
+                actual_allocated = check_resources(
+                    cid, workers, current_time, current_time + prelim_dur,
+                    job["demand_min"], job["demand_max"], eff
+                )
+                if actual_allocated is None:
+                    continue
+
+                # Recompute duration with actual allocation
+                actual_dur = compute_duration(job, actual_allocated)
+                if actual_dur is None:
+                    continue
+
+                # Re-check with actual duration (may differ from prelim_dur)
+                if actual_dur != prelim_dur:
+                    actual_allocated2 = check_resources(
+                        cid, workers, current_time, current_time + actual_dur,
+                        job["demand_min"], job["demand_max"], eff
+                    )
+                    if actual_allocated2 is None:
+                        continue
+                    # Recompute duration again
+                    actual_dur2 = compute_duration(job, actual_allocated2)
+                    if actual_dur2 is None:
+                        continue
+                    actual_allocated = actual_allocated2
+                    actual_dur = actual_dur2
+
+                total_workers = sum(workers.values())
+                feasible_contractors.append((total_workers, cid, c, actual_allocated, actual_dur))
+
+            if not feasible_contractors:
+                continue
+
+            # Pick contractor: smallest total workers, tie-break by lex id
+            feasible_contractors.sort(key=lambda x: (x[0], x[1]))
+            _, chosen_cid, chosen_c, chosen_allocated, chosen_dur = feasible_contractors[0]
+
+            start_time = current_time
+            end_time = start_time + chosen_dur
+
+            # Allocate resources
+            allocate_resources(chosen_cid, start_time, end_time, chosen_allocated)
+
+            # Record schedule
+            schedule[jid] = (chosen_cid, start_time, end_time)
+            execution_order.append(jid)
+            active_jobs[jid] = end_time
+            unscheduled.discard(jid)
+            scheduled_any = True
+
+            # Populate job_usage
+            job_usage[jid] = dict(chosen_allocated)
+
+            # Remove from eligible (update eligible list)
+            if jid in eligible:
+                eligible.remove(jid)
+
+        # Step 4: ADVANCE
+        if not scheduled_any and unscheduled:
+            if not active_jobs:
+                raise ValueError("Deadlock detected")
+            current_time = min(active_jobs.values())
+
+    # ─── Compute makespan ─────────────────────────────────────────────────────
+    if schedule:
+        makespan = max(v[2] for v in schedule.values())
+    else:
+        makespan = 0
+
+    # ─── Validation ───────────────────────────────────────────────────────────
+    # Check precedence constraints
+    for jid, job in job_map.items():
+        if jid not in schedule:
+            raise ValueError(f"Job '{jid}' not scheduled")
+        _, s, _ = schedule[jid]
+        for pid in job["predecessors"]:
+            _, _, pe = schedule[pid]
+            if pe > s:
+                raise ValueError(f"Precedence violated: '{pid}' must finish before '{jid}' starts")
+
+    return schedule, execution_order, resource_usage, job_usage, makespan

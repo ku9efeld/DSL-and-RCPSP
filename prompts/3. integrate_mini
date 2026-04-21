@@ -1,0 +1,59 @@
+Write only Python code in one ```python``` block.
+
+Implement:
+`rcpsp_solver(jobs, resources_borders, communication_coefficient=None)`
+
+Use `{steps}` only for priority ordering of heuristic `{method}`.
+All scheduling mechanics must follow the rules below.
+
+Return:
+`(schedule, execution_order, resource_usage, job_usage, makespan)`
+
+Input:
+- `jobs`: list of dicts with keys
+  `id, demand_min, demand_max, work_volume, predecessors, priority`
+- normalize predecessors:
+  `"" -> []`, string -> `[string]`
+- `resources_borders`: list of contractors with keys `id, workers`
+- `communication_coefficient`: optional `(n, m) -> float`
+
+Output:
+- `schedule[job_id] = (contractor_id, start_time, end_time)`
+- `execution_order`: append when scheduled
+- `resource_usage[contractor_id][t][r]`
+- `job_usage[job_id][r]`: actual allocated workers, reporting only
+- `makespan`: int
+
+Rules:
+1. Use integer times only; duration uses `math.ceil`.
+2. Use
+   `resource_usage = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: 0)))`
+3. Ignore resource `r` if `work_volume[r] == 0` or `demand_min[r] == demand_max[r] == 0`.
+4. A contractor is invalid for a job if any relevant `r` is missing in `workers` or `workers[r] < demand_min[r]`.
+5. For contractor `c` on interval `[start_time, end_time)`:
+   `allocated[r] = min(demand_max[r], min_t(workers[r] - resource_usage[c][t][r]))`
+   If any slot has availability `< demand_min[r]`, this contractor is infeasible.
+6. Compute duration only at scheduling time:
+   `duration = max_r ceil(work_volume[r] / productivity[r])`
+   where `productivity[r] = allocated[r] * communication_coefficient(allocated[r], demand_max[r])` if provided, else `allocated[r]`
+7. A job becomes eligible only after all predecessors finish.
+8. At each `current_time`:
+   - complete finished jobs and unlock successors
+   - collect eligible unscheduled jobs
+   - try to schedule each eligible job
+   - if nothing scheduled, advance to the minimum end_time among active jobs
+   - if no active jobs and unscheduled jobs remain, raise `ValueError("Deadlock detected")`
+9. For each eligible job, collect feasible contractors at `current_time`, then choose:
+   smallest `sum(workers.values())`, tie -> lexicographically smallest contractor id
+10. Before scheduling, ensure every job has at least one contractor satisfying minimum demand on all relevant resources; otherwise raise `ValueError`.
+11. Enforce wall-clock limit: 10 seconds.
+
+Validation before scheduling:
+- all required fields exist and job ids are unique
+- all predecessor ids exist
+- precedence graph is acyclic
+- if jobs is non-empty and `resources_borders` is empty, raise `ValueError`
+
+Important:
+- Do not use precomputed durations as actual scheduled durations
+- Output code only

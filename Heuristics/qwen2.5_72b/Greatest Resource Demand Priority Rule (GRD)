@@ -1,0 +1,134 @@
+import math
+from collections import defaultdict, deque
+from typing import List, Dict, Callable, Tuple
+
+def rcpsp_solver(jobs: List[Dict], resources_borders: List[Dict], communication_coefficient: Callable[[int, int], float] = None) -> Tuple[Dict, List, Dict, Dict, int]:
+    # EC0: Validate job fields and unique IDs
+    job_ids = set()
+    for job in jobs:
+        if not all(key in job for key in ['id', 'demand_min', 'demand_max', 'work_volume', 'predecessors', 'priority']):
+            raise ValueError(f"Job {job['id']} is missing required fields")
+        if job['id'] in job_ids:
+            raise ValueError(f"Duplicate job ID {job['id']}")
+        job_ids.add(job['id'])
+    
+    # EC1: Validate predecessor IDs
+    for job in jobs:
+        if isinstance(job['predecessors'], str):
+            job['predecessors'] = [job['predecessors']] if job['predecessors'] else []
+        for pred in job['predecessors']:
+            if pred not in job_ids:
+                raise ValueError(f"Predecessor {pred} of job {job['id']} does not exist")
+    
+    # EC2: Detect cycles in the precedence graph
+    def has_cycle(graph, node, visited, rec_stack):
+        visited[node] = True
+        rec_stack[node] = True
+        for neighbor in graph[node]:
+            if not visited[neighbor]:
+                if has_cycle(graph, neighbor, visited, rec_stack):
+                    return True
+            elif rec_stack[neighbor]:
+                return True
+        rec_stack[node] = False
+        return False
+    
+    graph = {job['id']: set(job['predecessors']) for job in jobs}
+    visited = {job['id']: False for job in jobs}
+    rec_stack = {job['id']: False for job in jobs}
+    for job_id in job_ids:
+        if not visited[job_id]:
+            if has_cycle(graph, job_id, visited, rec_stack):
+                raise ValueError("Cycle detected in the precedence graph")
+    
+    # EC3: Validate resource borders
+    if not resources_borders and jobs:
+        raise ValueError("No resource borders provided while jobs are non-empty")
+    
+    # Note 9: Verify feasible contractors for each job
+    for job in jobs:
+        feasible_contractors = []
+        for contractor in resources_borders:
+            if all(contractor['workers'].get(r, 0) >= job['demand_min'][r] for r in job['work_volume'] if job['work_volume'][r] > 0 and not (job['demand_min'][r] == job['demand_max'][r] == 0)):
+                feasible_contractors.append(contractor)
+        if not feasible_contractors:
+            raise ValueError(f"No feasible contractor for job {job['id']}")
+    
+    # Initialize data structures
+    schedule = {}
+    execution_order = []
+    resource_usage = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    job_usage = {job['id']: defaultdict(int) for job in jobs}
+    makespan = 0
+    current_time = 0
+    unscheduled_jobs = {job['id']: job for job in jobs}
+    active_jobs = []
+    completed_jobs = set()
+    pending_predecessors = {job['id']: len(job['predecessors']) for job in jobs}
+    
+    # Helper functions
+    def compute_duration(job, allocated_resources):
+        if communication_coefficient:
+            productivity = {r: allocated_resources[r] * communication_coefficient(allocated_resources[r], job['demand_max'][r]) for r in job['work_volume']}
+        else:
+            productivity = {r: allocated_resources[r] for r in job['work_volume']}
+        return max(math.ceil(job['work_volume'][r] / productivity[r]) for r in job['work_volume'] if job['work_volume'][r] > 0 and not (job['demand_min'][r] == job['demand_max'][r] == 0))
+    
+    def check_resources(contractor_id, job, start_time, end_time):
+        for t in range(start_time, end_time):
+            for r in job['work_volume']:
+                if job['work_volume'][r] > 0 and not (job['demand_min'][r] == job['demand_max'][r] == 0):
+                    if resources_borders[contractor_id]['workers'][r] - resource_usage[contractor_id][t][r] < job['demand_min'][r]:
+                        return False
+        return True
+    
+    def allocate_resources(contractor_id, job, start_time, end_time):
+        allocated_resources = {r: min(job['demand_max'][r], min(resources_borders[contractor_id]['workers'][r] - resource_usage[contractor_id][t][r] for t in range(start_time, end_time))) for r in job['work_volume']}
+        for t in range(start_time, end_time):
+            for r in job['work_volume']:
+                if job['work_volume'][r] > 0 and not (job['demand_min'][r] == job['demand_max'][r] == 0):
+                    resource_usage[contractor_id][t][r] += allocated_resources[r]
+        return allocated_resources
+    
+    # Main loop
+    while unscheduled_jobs or active_jobs:
+        # COMPLETE: Mark completed jobs
+        for job_id, (contractor_id, start_time, end_time) in list(schedule.items()):
+            if end_time <= current_time and job_id not in completed_jobs:
+                completed_jobs.add(job_id)
+                for successor in jobs[job_id]['successors']:
+                    pending_predecessors[successor] -= 1
+        
+        # ELIGIBLE: Collect eligible jobs
+        eligible_jobs = [job for job in unscheduled_jobs.values() if pending_predecessors[job['id']] == 0]
+        
+        # SCHEDULE: Attempt to schedule eligible jobs
+        for job in eligible_jobs:
+            feasible_contractors = []
+            for contractor in resources_borders:
+                if all(contractor['workers'].get(r, 0) >= job['demand_min'][r] for r in job['work_volume'] if job['work_volume'][r] > 0 and not (job['demand_min'][r] == job['demand_max'][r] == 0)):
+                    duration = compute_duration(job, {r: min(job['demand_max'][r], contractor['workers'][r]) for r in job['work_volume']})
+                    if check_resources(contractor['id'], job, current_time, current_time + duration):
+                        feasible_contractors.append((contractor['id'], sum(contractor['workers'].values())))
+            
+            if feasible_contractors:
+                feasible_contractors.sort(key=lambda x: (x[1], x[0]))
+                contractor_id = feasible_contractors[0][0]
+                allocated_resources = allocate_resources(contractor_id, job, current_time, current_time + duration)
+                schedule[job['id']] = (contractor_id, current_time, current_time + duration)
+                execution_order.append(job['id'])
+                job_usage[job['id']].update(allocated_resources)
+                del unscheduled_jobs[job['id']]
+                active_jobs.append((job['id'], current_time + duration))
+        
+        # ADVANCE: Advance current_time
+        if not active_jobs and unscheduled_jobs:
+            raise ValueError("Deadlock detected")
+        if active_jobs:
+            current_time = min(end_time for _, end_time in active_jobs)
+            active_jobs = [(job_id, end_time) for job_id, end_time in active_jobs if end_time > current_time]
+    
+    # Compute makespan
+    makespan = max(end_time for _, end_time in schedule.values())
+    
+    return schedule, execution_order, resource_usage, job_usage, makespan
