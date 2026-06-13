@@ -30,7 +30,7 @@ def init_experiment(GA_params,
                     model_name, 
                     structures = (
                                   'switch_Topological',), 
-                    imprt = 10):
+                    imprt = 8):
     solvers_dict = {}
     solvers_dict['genetic'] = GeneticScheduler(**GA_params)
     for structure in structures:
@@ -39,8 +39,8 @@ def init_experiment(GA_params,
                                       **GA_params, 
                                       type_init_pop_structure=structure, 
                                       imprortance=imprt)
-        # if structure is None:
-        #     structure = 'x'
+        if structure is None:
+            structure = 'add_with_HEFT'
         solvers_dict[model_name + '_' + structure] = model
     return solvers_dict
 

@@ -32,6 +32,8 @@ class Evaluator():
         return makespan
     
 
+
+from sampo.scheduler.genetic import GeneticScheduler
 class LLMHeuristicScheduler(GeneticScheduler):
     def __init__(self,
                  solvers_by,
@@ -59,18 +61,27 @@ class LLMHeuristicScheduler(GeneticScheduler):
         self.imprt = imprortance
 
     def get_filter(self):
-        with open(os.path.join(self.solvers_by_path, 'original_heuristics.json'), "r", encoding="utf-8") as f:
+
+        with open(os.path.join(self.solvers_by_path, 'original_heuristics.json'), "r", encoding="cp1251") as f:
             filter = set(json.load(f))
+            
         return filter
     
     def get_llm_heuristics(self):
-        filter = self.get_filter()
-        files = [file for file in os.listdir(self.solvers_by_path) if file not in ('Steps', 'original_heuristics.json')]
+        files = [file for file in os.listdir(self.solvers_by_path) if file not in ('Steps', 'original_heuristics.json', '.DS_Store')]
+
+        n = len(files)
+        if n <= 10:
+            filter = self.get_filter()
+
         heuristics = {}
         for file in files:
-            if file.split(' ')[-1] not in filter:
-                continue
-            with open(os.path.join(self.solvers_by_path, file), "r", encoding="utf-8") as f:
+            
+            if n <= 10:
+                if file.split(' ')[-1] not in filter:
+                    continue
+
+            with open(os.path.join(self.solvers_by_path, file), "r", encoding="cp1251") as f:
                 code = f.read()
             heuristics[file] = code
         return heuristics
@@ -84,7 +95,11 @@ class LLMHeuristicScheduler(GeneticScheduler):
         project_converter, eval = ProjectConverter(work_graph, contractors), Evaluator(work_graph, contractors)
         population = {}
         for method, code in self.llm_heuristics.items():
-            schedule, order, _, job_usage,  makespan = interpter_solver(method, code, data)
+            try:
+                schedule, order, _, job_usage,  makespan = interpter_solver(method, code, data)
+            except Exception as e:
+                print(f'Error executing code for method {method}: {e}')
+                continue
             schedule_obj = project_converter.to_schedule(schedule, order, job_usage, makespan)
             graph_nodes = project_converter.get_list_graph_nodes(schedule_obj)
             if validate_schedule_bool(schedule_obj, work_graph, contractors, spec):
@@ -117,11 +132,13 @@ class LLMHeuristicScheduler(GeneticScheduler):
                 # Проверка, что TimeEst работ совпадает между SAMPO / внутренним подсчетом в эвристике, по makespan
                 chromosome = project_converter.to_chromosome(schedule_obj)
                 if eval.makespan(chromosome) == makespan:
+                    print(makespan, method)
                     population[method] = chromosome # ChromosomeType
+        
+        print(len(population))
+
         return population
     
-
-
     
     def generate_init_population(self, n, work_graph, contractors,
                                   landscape = LandscapeConfiguration(), 
@@ -207,13 +224,13 @@ class LLMHeuristicScheduler(GeneticScheduler):
                 
                 sampo_init_schedules = self.sampo_fist_popualtion_chrms(work_graph, contractors)
                 
-                count_for_specified_types = (n // 3) // len(sampo_init_schedules)
+                count_for_specified_types = (n // 10) // len(sampo_init_schedules)  # n // 5 
                 count_for_specified_types = count_for_specified_types if count_for_specified_types > 0 else 1
                 weights = [importance for _, importance in sampo_init_schedules.values()]
                 counts = [math.ceil(count_for_specified_types * weight) for weight in weights]
                 sum_counts_for_specified_types = sum(counts)
 
-                count_for_specified_heuristics = n // 2 - sum_counts_for_specified_types
+                count_for_specified_heuristics = (n // 2 - sum_counts_for_specified_types) // len(init_schedules)
                 counts_for_llm = [count_for_specified_heuristics] * len(init_schedules)
                 counts += counts_for_llm
 
@@ -236,17 +253,40 @@ class LLMHeuristicScheduler(GeneticScheduler):
                 return chromosomes[:n]
 
 
-                pass
+            case "switch_HEFT":
+                init_schedules = self.generate_llm_first_population_chrms(work_graph, contractors)
+                count_for_specified_types = (n // 3) // len(init_schedules)
+                count_for_specified_types = count_for_specified_types if count_for_specified_types > 0 else 1
+                counts = [count_for_specified_types] * len(init_schedules)
+                sum_counts_for_specified_types = sum(counts)
 
-            case "50/50":
-                pass
-            
-        
-                
-    
+                count_for_topological = n // 2 - sum_counts_for_specified_types
+                count_for_topological = count_for_topological if count_for_topological > 0 else 1
+                counts.append(count_for_topological)
+
+                # Counts for rand_lft
+                count_for_rand_lft = n - count_for_topological - sum_counts_for_specified_types
+                count_for_rand_lft = count_for_rand_lft if count_for_rand_lft > 0 else 1
+ 
+                counts.append(count_for_rand_lft)
+ 
+                chromosome_types = rand.sample(  list(init_schedules.keys()) + ['topological'] + ['rand_lft'], k=n, counts=counts)
+
+                chromosomes = []
+
+                for generated_type in chromosome_types:
+                    match generated_type:
+                        case 'topological':
+                            ind = randomized_init(is_topological=True)
+                        case 'rand_lft':
+                            ind = randomized_init(is_topological=False)
+                        case _ if generated_type in init_schedules.keys():
+                            ind = init_schedules[generated_type]
+                    chromosomes.append(ind)
+                return chromosomes[:n]
     
     def schedule_with_cache(self, work_graph, 
-                            contractors, spec = ScheduleSpec(), validate = False, 
+                            contractors, spec = ScheduleSpec(), validate = True, 
                             assigned_parent_time = Time(0), 
                             timeline = None, landscape = LandscapeConfiguration()): # validate change on TRUE !!!!
         

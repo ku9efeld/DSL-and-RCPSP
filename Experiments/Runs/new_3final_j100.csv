@@ -1,0 +1,7 @@
+,Makespan,Time,run,Algorithm
+0,258.0,1,1,genetic
+0,188.0,1,1,combined_models_switch_Topological
+0,188.0,1,1,combined_models_switch_ALL
+0,188.0,1,1,combined_models_switch_LFTrand
+0,188.0,1,1,combined_models_switch_HEFT
+0,188.0,1,1,combined_models_add_with_HEFT

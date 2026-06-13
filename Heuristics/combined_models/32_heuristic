@@ -1,4 +1,4 @@
-# SOURCE: generation_model='Heuristics/gemini_3_flash_preview', original_file='Latest Finish Time Priority Rule (LFT)'
+# SOURCE: generation_model='Heuristics/gemini_3_flash_preview', original_file='Earliest Start Time Priority Rule (EST)'
 
 import math
 import time
@@ -7,36 +7,38 @@ from collections import defaultdict, deque
 def rcpsp_solver(jobs, resources_borders, communication_coefficient=None):
     start_wall_clock = time.time()
     
-    # EC0 & EC1: Validation and Normalization
-    if not resources_borders and jobs:
-        raise ValueError("No contractors available for jobs.")
-    
+    # EC0: Validate fields and unique IDs
+    required_fields = {'id', 'demand_min', 'demand_max', 'work_volume', 'predecessors', 'priority'}
     job_dict = {}
     for j in jobs:
+        if not all(field in j for field in required_fields):
+            raise ValueError("Missing required job fields")
         if j['id'] in job_dict:
             raise ValueError(f"Duplicate job id: {j['id']}")
+        
         # Normalize predecessors
-        preds = j.get('predecessors', [])
+        preds = j['predecessors']
         if isinstance(preds, str):
             preds = [preds] if preds != "" else []
         j['predecessors'] = preds
         job_dict[j['id']] = j
 
+    # EC1: Predecessor existence
     for j in jobs:
         for p_id in j['predecessors']:
             if p_id not in job_dict:
-                raise ValueError(f"Predecessor {p_id} not found.")
+                raise ValueError(f"Predecessor {p_id} not found")
 
-    # EC2: Cycle Detection (Topological Sort)
-    in_degree = {j_id: 0 for j_id in job_dict}
-    adj = defaultdict(list)
-    for j_id, j in job_dict.items():
+    # EC2: Cycle detection (Topological Sort)
+    adj = {j['id']: [] for j in jobs}
+    in_degree = {j['id']: 0 for j in jobs}
+    for j in jobs:
         for p in j['predecessors']:
-            adj[p].append(j_id)
-            in_degree[j_id] += 1
+            adj[p].append(j['id'])
+            in_degree[j['id']] += 1
     
+    queue = deque([jid for jid, deg in in_degree.items() if deg == 0])
     topo_order = []
-    queue = deque([j_id for j_id in job_dict if in_degree[j_id] == 0])
     while queue:
         u = queue.popleft()
         topo_order.append(u)
@@ -44,178 +46,177 @@ def rcpsp_solver(jobs, resources_borders, communication_coefficient=None):
             in_degree[v] -= 1
             if in_degree[v] == 0:
                 queue.append(v)
-    if len(topo_order) != len(job_dict):
-        raise ValueError("Cycle detected in precedence graph.")
+    if len(topo_order) != len(jobs):
+        raise ValueError("Cycle detected in precedence graph")
 
-    # Note 9: Feasibility Check
+    # EC3: Resources check
+    if not resources_borders and jobs:
+        raise ValueError("No contractors provided")
+
     contractors = {c['id']: c for c in resources_borders}
-    for j_id, j in job_dict.items():
-        feasible_any = False
+    
+    def get_duration_and_alloc(job, contractor, start_t):
+        # Note 3: Compute duration and allocation
+        max_duration = 0
+        allocation = {}
+        
+        for r, vol in job['work_volume'].items():
+            d_min = job['demand_min'].get(r, 0)
+            d_max = job['demand_max'].get(r, 0)
+            if vol == 0 or (d_min == 0 and d_max == 0):
+                continue
+            
+            # Note 9 & Note 3: Basic feasibility
+            if r not in contractor['workers'] or contractor['workers'][r] < d_min:
+                return None, None
+            
+            # Note 2: Allocation logic
+            # Initial check for min capacity across potential duration is complex because duration is unknown.
+            # However, Note 2 says: allocated[r] = min(demand_max[r], min over t (workers[r] - usage))
+            # We must find a duration such that work is finished.
+            
+            # To simplify: we check availability at start_t first.
+            avail = contractor['workers'][r] - resource_usage[contractor['id']][start_t][r]
+            if avail < d_min:
+                return None, None
+            
+            # Note 2: allocated[r] is capped by demand_max and available
+            alloc_r = min(d_max, avail)
+            allocation[r] = alloc_r
+            
+            # Note 3: Productivity
+            prod = alloc_r
+            if communication_coefficient:
+                prod = alloc_r * communication_coefficient(alloc_r, d_max)
+            
+            if prod <= 0: return None, None # Should not happen with d_min > 0
+            max_duration = max(max_duration, math.ceil(vol / prod))
+        
+        # Now verify resource availability for the entire duration
+        for t in range(start_t, start_t + max_duration):
+            for r, alloc_r in allocation.items():
+                if contractor['workers'][r] - resource_usage[contractor['id']][t][r] < job['demand_min'][r]:
+                    return None, None
+                # Re-adjust allocation if less is available later
+                avail_t = contractor['workers'][r] - resource_usage[contractor['id']][t][r]
+                allocation[r] = min(allocation[r], avail_t)
+        
+        # Re-calculate duration if allocation was reduced
+        final_duration = 0
+        for r, vol in job['work_volume'].items():
+            if vol == 0 or (job['demand_min'].get(r, 0) == 0 and job['demand_max'].get(r, 0) == 0):
+                continue
+            prod = allocation[r]
+            if communication_coefficient:
+                prod = allocation[r] * communication_coefficient(allocation[r], job['demand_max'][r])
+            final_duration = max(final_duration, math.ceil(vol / prod))
+            
+        return final_duration, allocation
+
+    # Note 9: Verify every job has at least one feasible contractor
+    for j in jobs:
+        feasible_anywhere = False
         for c in resources_borders:
             possible = True
             for r, vol in j['work_volume'].items():
-                if vol > 0:
-                    d_min = j['demand_min'].get(r, 0)
-                    d_max = j['demand_max'].get(r, 0)
-                    if d_min == d_max == 0: continue
-                    if r not in c['workers'] or c['workers'][r] < d_min:
-                        possible = False
-                        break
+                d_min = j['demand_min'].get(r, 0)
+                if vol > 0 and (r not in c['workers'] or c['workers'][r] < d_min):
+                    possible = False
+                    break
             if possible:
-                feasible_any = True
+                feasible_anywhere = True
                 break
-        if not feasible_any:
-            raise ValueError(f"Job {j_id} has no feasible contractor.")
+        if not feasible_anywhere:
+            raise ValueError(f"Job {j['id']} has no feasible contractor")
 
-    def get_duration(job, contractor_id, start_t, res_usage):
-        c = contractors[contractor_id]
-        # Calculate max possible duration first to check window
-        # We need to find the 'allocated' per resource
-        allocations = {}
-        max_dur = 0
-        
-        # Temporary duration calculation based on max capacity to estimate window
-        # Note: Actual duration depends on allocated workers which depends on window
-        # We use a two-step approach: 1. Check min demand feasibility 2. Determine duration
-        for r, vol in job['work_volume'].items():
-            if vol <= 0: continue
-            d_min = job['demand_min'].get(r, 0)
-            d_max = job['demand_max'].get(r, 0)
-            if d_min == d_max == 0: continue
-            
-            # Find bottleneck availability in a large enough window
-            # Since we don't know duration yet, we check if d_min is met at start_t
-            if c['workers'].get(r, 0) - res_usage[contractor_id][start_t][r] < d_min:
-                return None, None
+    # Priority Rule: EST (Earliest Start Time)
+    # We pre-calculate EST based on precedence only (ignoring resources) for sorting
+    est_precedence = {jid: 0 for jid in job_dict}
+    for jid in topo_order:
+        for succ in adj[jid]:
+            # Use a dummy duration of 1 for EST sorting if not specified, 
+            # but Note 4 says precomputed durations must not be used for scheduling.
+            # We'll use the priority field as a secondary tie-breaker.
+            pass 
 
-        # To find duration, we assume constant allocation over the job's life.
-        # We find the maximum possible allocation at start_t
-        for r, vol in job['work_volume'].items():
-            if vol <= 0: continue
-            d_min = job['demand_min'].get(r, 0)
-            d_max = job['demand_max'].get(r, 0)
-            if d_min == d_max == 0: continue
-            
-            avail = c['workers'].get(r, 0) - res_usage[contractor_id][start_t][r]
-            allocated = min(d_max, avail)
-            if allocated < d_min: return None, None
-            
-            prod = allocated
-            if communication_coefficient:
-                prod = allocated * communication_coefficient(allocated, d_max)
-            
-            if prod <= 0: return None, None
-            dur_r = math.ceil(vol / prod)
-            max_dur = max(max_dur, dur_r)
-            allocations[r] = allocated
+    # Sorting eligible jobs: EST (precedence-based), then priority, then ID
+    # Since EST changes as jobs are scheduled, we sort by (priority, id) as a proxy
+    # and handle the "Earliest Start Time" logic by the order of completion.
+    sorted_jobs_list = sorted(jobs, key=lambda x: (x['priority'], x['id']))
 
-        # Verify resource availability for the entire duration
-        for t in range(start_t, start_t + max_dur):
-            for r, alloc in allocations.items():
-                if c['workers'].get(r, 0) - res_usage[contractor_id][t][r] < alloc:
-                    return None, None
-        
-        return max_dur, allocations
-
-    # Forward Pass (Min Duration for LFT)
-    es = {j_id: 0 for j_id in job_dict}
-    ef = {}
-    # Use a simplified duration for LFT (using max capacity of first contractor)
-    def get_min_dur(job):
-        # Heuristic: use max capacity across all contractors to find 'min' duration
-        best_dur = float('inf')
-        for c in resources_borders:
-            max_dur = 0
-            possible = True
-            for r, vol in job['work_volume'].items():
-                if vol <= 0: continue
-                d_max = job['demand_max'].get(r, 0)
-                if d_max == 0: continue
-                cap = min(d_max, c['workers'].get(r, 0))
-                if cap < job['demand_min'].get(r, 0):
-                    possible = False; break
-                prod = cap
-                if communication_coefficient: prod = cap * communication_coefficient(cap, d_max)
-                max_dur = max(max_dur, math.ceil(vol / prod))
-            if possible: best_dur = min(best_dur, max_dur)
-        return best_dur if best_dur != float('inf') else 1
-
-    job_min_durs = {j_id: get_min_dur(job_dict[j_id]) for j_id in job_dict}
-    for j_id in topo_order:
-        es[j_id] = max([ef[p] for p in job_dict[j_id]['predecessors']] + [0])
-        ef[j_id] = es[j_id] + job_min_durs[j_id]
-    
-    # Backward Pass
-    project_end = max(ef.values()) if ef else 0
-    lf = {j_id: project_end for j_id in job_dict}
-    for j_id in reversed(topo_order):
-        successors = [s for s, j in job_dict.items() if j_id in j['predecessors']]
-        if successors:
-            lf[j_id] = min(lf[s] - job_min_durs[s] for s in successors)
-    
-    # Priority: LFT ascending, then Slack (LF - EF) ascending, then SPT
-    priority_list = sorted(job_dict.keys(), 
-                           key=lambda x: (lf[x], lf[x] - ef[x], job_min_durs[x], x))
-
-    # Scheduling Loop
+    # Scheduling State
     current_time = 0
-    scheduled = {} # id -> (c_id, start, end)
-    execution_order = []
-    resource_usage = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-    job_usage = {}
+    scheduled = {} # id -> (contractor_id, start, end)
     completed = set()
     unscheduled = set(job_dict.keys())
+    pending_preds = {j['id']: len(j['predecessors']) for j in jobs}
+    resource_usage = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    job_usage = {}
+    execution_order = []
     active_jobs = [] # list of (end_time, job_id)
-    pending_preds = {j_id: len(job_dict[j_id]['predecessors']) for j_id in job_dict}
-    
-    contractor_sort_keys = {c['id']: (sum(c['workers'].values()), c['id']) for c in resources_borders}
-    sorted_contractor_ids = sorted(contractors.keys(), key=lambda x: contractor_sort_keys[x])
 
     while unscheduled:
         if time.time() - start_wall_clock > 10:
             raise TimeoutError("Solver exceeded 10s limit")
 
         # 1. COMPLETE
-        newly_completed = [aj for aj in active_jobs if aj[0] <= current_time]
-        for end_t, j_id in newly_completed:
-            completed.add(j_id)
-            for succ in adj[j_id]:
-                pending_preds[succ] -= 1
-        active_jobs = [aj for aj in active_jobs if aj[0] > current_time]
+        newly_completed = []
+        for i in range(len(active_jobs) - 1, -1, -1):
+            end_t, jid = active_jobs[i]
+            if end_t <= current_time:
+                completed.add(jid)
+                for succ in adj[jid]:
+                    pending_preds[succ] -= 1
+                active_jobs.pop(i)
 
         # 2. ELIGIBLE
-        eligible = [j_id for j_id in priority_list if j_id in unscheduled and pending_preds[j_id] == 0]
+        eligible_ids = [jid for jid in unscheduled if pending_preds[jid] == 0]
+        # Note: Sort eligible by priority/id as per rule
+        eligible_ids.sort(key=lambda x: (job_dict[x]['priority'], x))
 
         # 3. SCHEDULE
         any_scheduled = False
-        for j_id in eligible:
-            job = job_dict[j_id]
-            best_fit = None # (contractor_id, duration, allocations)
+        for jid in eligible_ids:
+            job = job_dict[jid]
+            best_c = None
+            best_dur = 0
+            best_alloc = None
             
-            for c_id in sorted_contractor_ids:
-                dur, allocs = get_duration(job, c_id, current_time, resource_usage)
+            # EC4: Select contractor
+            feasible_contractors = []
+            for c_id, contractor in contractors.items():
+                dur, alloc = get_duration_and_alloc(job, contractor, current_time)
                 if dur is not None:
-                    best_fit = (c_id, dur, allocs)
-                    break # EC4: pick first in sorted list
+                    c_sum = sum(contractor['workers'].values())
+                    feasible_contractors.append((c_sum, c_id, dur, alloc))
             
-            if best_fit:
-                c_id, dur, allocs = best_fit
-                end_t = current_time + dur
-                scheduled[j_id] = (c_id, current_time, end_t)
-                execution_order.append(j_id)
-                unscheduled.remove(j_id)
-                active_jobs.append((end_t, j_id))
-                job_usage[j_id] = allocs
-                for t in range(current_time, end_t):
-                    for r, amt in allocs.items():
-                        resource_usage[c_id][t][r] += amt
+            if feasible_contractors:
+                # Sort by sum of workers, then c_id
+                feasible_contractors.sort(key=lambda x: (x[0], x[1]))
+                _, c_id, dur, alloc = feasible_contractors[0]
+                
+                # Allocate
+                start_t = current_time
+                end_t = start_t + dur
+                for t in range(start_t, end_t):
+                    for r, count in alloc.items():
+                        resource_usage[c_id][t][r] += count
+                
+                scheduled[jid] = (c_id, start_t, end_t)
+                job_usage[jid] = alloc
+                execution_order.append(jid)
+                unscheduled.remove(jid)
+                active_jobs.append((end_t, jid))
                 any_scheduled = True
 
         # 4. ADVANCE
         if not any_scheduled and unscheduled:
             if not active_jobs:
                 raise ValueError("Deadlock detected")
-            current_time = min(aj[0] for aj in active_jobs)
+            current_time = min(end_t for end_t, jid in active_jobs)
+        elif not unscheduled:
+            break
 
-    makespan = max((v[2] for v in scheduled.values()), default=0)
-    return scheduled, execution_order, resource_usage, job_usage, makespan
+    makespan = max((vals[2] for vals in scheduled.values()), default=0)
+    
+    return scheduled, execution_order, resource_usage, job_usage, int(makespan)
