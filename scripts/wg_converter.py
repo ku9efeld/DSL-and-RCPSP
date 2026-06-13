@@ -157,6 +157,8 @@ class ProjectConverter:
         scheduled_works.append(end_project)
         return Schedule.from_scheduled_works(scheduled_works, self.work_graph)
     
+
+    
     def is_valid_chromosome(self, chromosome):
         return is_chromosome_correct(chromosome, node_indices=self.node_indices, parents=self.parents,
                      contractor_borders=self.contractor_borders, 
